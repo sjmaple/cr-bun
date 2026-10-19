@@ -514,9 +514,10 @@ impl<'a, const TYPESCRIPT: bool, const SCAN_ONLY: bool> P<'a, TYPESCRIPT, SCAN_O
 
         // Are these arguments to an arrow function?
         let mut is_arrow_fn = p.lexer.token == T::TEqualsGreaterThan;
+        // A cast, "!", type arguments or more parentheses cannot be parameters: a ":" behind them is not a return type.
         if is_arrow_fn
             || opts.force_arrow_fn
-            || (Self::IS_TYPESCRIPT_ENABLED && p.lexer.token == T::TColon)
+            || (Self::IS_TYPESCRIPT_ENABLED && p.lexer.token == T::TColon && !errors.is_not_binding)
         {
             // Arrow functions are not allowed inside certain expressions
             if level.gt(Level::Assign) {
@@ -571,7 +572,11 @@ impl<'a, const TYPESCRIPT: bool, const SCAN_ONLY: bool> P<'a, TYPESCRIPT, SCAN_O
             // attempt to convert the expressions to bindings first before deciding
             // whether this is an arrow function, and only pick an arrow function if
             // there were no conversion errors.
-            if Self::IS_TYPESCRIPT_ENABLED && p.lexer.token == T::TColon && invalid_log.is_empty() {
+            if Self::IS_TYPESCRIPT_ENABLED
+                && p.lexer.token == T::TColon
+                && invalid_log.is_empty()
+                && !errors.is_not_binding
+            {
                 if opts.is_after_question_and_before_colon {
                     // "()", a rest item and an item with a type are parameters or an error, never an expression. "async()" and "async(...a)" are also calls.
                     let is_parameter_list = type_colon_range.len > 0
@@ -649,8 +654,17 @@ impl<'a, const TYPESCRIPT: bool, const SCAN_ONLY: bool> P<'a, TYPESCRIPT, SCAN_O
         if items.len() > 0 {
             p.log_expr_errors(&mut errors);
             if spread_range.len > 0 {
+                // Found in `items`: to keep `spread_range.loc` for this error costs every parenthesized expression a register.
+                let range = items
+                    .iter()
+                    .rev()
+                    .find(|item| matches!(item.data, js_ast::expr::Data::ESpread(_)))
+                    .map_or(bun_ast::Range::NONE, |item| bun_ast::Range {
+                        loc: item.loc,
+                        len: 3,
+                    });
                 p.log()
-                    .add_range_error(Some(p.source), type_colon_range, b"Unexpected \"...\"");
+                    .add_range_error(Some(p.source), range, b"Unexpected \"...\"");
                 return Err(crate::Error::SyntaxError);
             }
 
