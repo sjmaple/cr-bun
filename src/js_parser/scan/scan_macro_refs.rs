@@ -18,7 +18,8 @@ struct Locator<'r, 'a> {
     stack_check: bun_core::StackCheck,
 }
 
-/// Each identifier that names a key of `refs`, in source order. What is nested deeper than `MAX_DEPTH` is not in it.
+/// Each identifier that names a key of `refs`, in the order of the statements. What is nested deeper than `MAX_DEPTH`
+/// is not in it.
 #[cold]
 #[inline(never)]
 pub(crate) fn locate_macro_refs(parts: [&[ast::Part]; 3], refs: &MacroRefs<'_>) -> Vec<(Ref, Loc)> {
@@ -31,9 +32,7 @@ pub(crate) fn locate_macro_refs(parts: [&[ast::Part]; 3], refs: &MacroRefs<'_>) 
     for part in parts.into_iter().flatten() {
         locator.stmts(part.stmts.slice());
     }
-    let mut found = locator.found;
-    found.sort_by_key(|(_, loc)| loc.start);
-    found
+    locator.found
 }
 
 impl Locator<'_, '_> {
@@ -249,29 +248,43 @@ impl Locator<'_, '_> {
     }
 
     fn expr_at_depth(&mut self, expr: &Expr) {
-        // A long `a + b + c + ...` is as deep to the left as it is long, and `a.b().c()...` at its target.
+        // A long `a + b + c + ...` is as deep to the left as it is long, and `a.b().c()...` at its target. The links
+        // of such a chain wait here, not on the stack, for what is left of them.
+        let mut chain: Vec<&Expr> = Vec::new();
         let mut expr = expr;
         loop {
             expr = match &expr.data {
                 Data::EBinary(e) => {
-                    self.expr(&e.right);
+                    chain.push(expr);
                     &e.left
                 }
                 Data::EDot(e) => &e.target,
                 Data::EIndex(e) => {
-                    self.expr(&e.index);
+                    chain.push(expr);
                     &e.target
                 }
                 Data::ECall(e) => {
-                    self.exprs(e.args.slice());
+                    chain.push(expr);
                     &e.target
                 }
                 _ => break,
             };
         }
+        self.expr_outside_chain(expr);
+        while let Some(link) = chain.pop() {
+            match &link.data {
+                Data::EBinary(e) => self.expr(&e.right),
+                Data::EIndex(e) => self.expr(&e.index),
+                Data::ECall(e) => self.exprs(e.args.slice()),
+                _ => unreachable!("only these are pushed"),
+            }
+        }
+    }
+
+    fn expr_outside_chain(&mut self, expr: &Expr) {
         match &expr.data {
             Data::EBinary(_) | Data::EDot(_) | Data::EIndex(_) | Data::ECall(_) => {
-                unreachable!("the loop above ends at what is none of these")
+                unreachable!("the loop in `expr_at_depth` ends at what is none of these")
             }
             Data::EIdentifier(e) => self.name(e.ref_, expr.loc),
             Data::EImportIdentifier(e) => self.name(e.ref_, expr.loc),
