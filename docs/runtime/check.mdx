@@ -436,6 +436,10 @@ for (const log of result.logs) {
 /app/src/index.ts:3: TS2322: Type 'string' is not assignable to type 'number'.
 ```
 
+The check reads each file as it is written. If the file is in [`files`](/bundler#files), Bun checks that text. Otherwise, Bun checks the file on disk. An `onLoad` [plugin](/bundler/plugins) changes what Bun bundles, not what Bun checks. If only a plugin provides a file, Bun checks what the plugin returns.
+
+Bun also checks a file in `files` that the bundle does not load, such as the target of `import type`. The key of that file must be its absolute path.
+
 ## If `package.json` has a `check` script
 
 Your script wins. `bun check` runs it, like `bun run check`, and passes it your flags. To run the type checker in that project, pass `--no-script`.

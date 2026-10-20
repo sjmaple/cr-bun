@@ -305,12 +305,19 @@ fn run_quietly(
 /// `provided`, with `Provided::scripts_of_page`.
 fn with_pages(cwd: &[u8], provided: Provided) -> Provided {
     use bun_sema_driver::host::{from_native, to_native};
+    // A page of `files` of `Bun.build` is scanned as it is there, which is what the bundler scans.
+    let pages = provided.already_read.iter();
+    let pages = pages.filter(|(path, _)| path.ends_with(b".html"));
+    let pages: AlreadyRead = pages
+        .map(|(path, text)| (path.clone(), text.clone()))
+        .collect();
     // One thread at a time: the first sets up what the scanner reads.
     let (cwd, turn) = (cwd.to_vec(), bun_threading::Guarded::new(()));
     Provided {
         scripts_of_page: Some(Box::new(move |page| {
             let _turn = turn.lock();
-            let scripts = imports_of_page(&cwd, to_native(page)).into_iter();
+            let text = pages.get(page).map(Vec::as_slice);
+            let scripts = imports_of_page(&cwd, to_native(page), text).into_iter();
             let scripts = scripts.filter(|path| has_types(path));
             scripts.map(|path| from_native(&path)).collect()
         })),
@@ -643,8 +650,9 @@ pub(crate) fn check_for_bun_build(checked: TypeChecked, log: &mut bun_ast::Log) 
     check_for_build(checked, log, false)
 }
 
-/// The files of the bundle, `sources`, are not read again. The errors are added to `log`, which the
-/// build reports like its own. It runs on the thread of the bundler.
+/// What is in `sources` is not read from the disk: the files of the bundle, and `files` of
+/// `Bun.build`. The errors are added to `log`, which the build reports like its own. It runs on
+/// the thread of the bundler.
 fn check_for_build(checked: TypeChecked, log: &mut bun_ast::Log, shows_progress: bool) -> bool {
     let TypeChecked {
         cwd,
@@ -768,7 +776,7 @@ fn what_to_check(
         let path = entry_point.path;
         if path.ends_with(b".html") {
             for page in pages_of(cwd, path) {
-                let scripts = imports_of_page(cwd, &page);
+                let scripts = imports_of_page(cwd, &page, None);
                 paths.extend(scripts.into_iter().filter(|path| has_types(path)));
             }
         } else if let Some(loader) = entry_point.loader {
@@ -816,12 +824,17 @@ fn pages_of(cwd: &[u8], page: &[u8]) -> Vec<Vec<u8>> {
 }
 
 /// The absolute paths of the local files the HTML entry point `page` imports, from the bundler's HTML scanner. Empty if the page cannot
-/// be read or parsed, which the bundler reports.
-fn imports_of_page(cwd: &[u8], page: &[u8]) -> Vec<Vec<u8>> {
+/// be read or parsed, which the bundler reports. `text`: what the page is, if it is not what is on the disk.
+fn imports_of_page(cwd: &[u8], page: &[u8], text: Option<&[u8]>) -> Vec<Vec<u8>> {
     use bun_paths::{platform::Auto, resolve_path};
+    use std::borrow::Cow;
     let page = resolve_path::join_abs_string::<Auto>(cwd, &[page]).to_vec();
-    let Ok(contents) = bun_sys::File::read_from(bun_core::Fd::cwd(), &page) else {
-        return Vec::new();
+    let contents = match text {
+        Some(text) => Cow::Borrowed(text),
+        None => match bun_sys::File::read_from(bun_core::Fd::cwd(), &page) {
+            Ok(contents) => Cow::Owned(contents),
+            Err(_) => return Vec::new(),
+        },
     };
     let source = bun_ast::Source::init_path_string(&page[..], &contents[..]);
     let mut log = bun_ast::Log::init();

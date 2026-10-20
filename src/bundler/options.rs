@@ -1188,13 +1188,16 @@ pub struct TypeChecked<'a, 'i> {
     pub tsconfig: Option<&'a [u8]>,
     /// `custom_conditions`
     pub conditions: &'a [Box<[u8]>],
-    /// `loaders`. A file that only has types is not in the bundle, so not among `sources`.
+    /// `loaders`. A file on the disk that only has types is not in the bundle, so not among
+    /// `sources`.
     pub loaders: &'a LoaderHashTable,
     /// The path of each JavaScript or TypeScript file that an entry point resolved to, or that a
     /// page imports.
     pub entry_points: &'i mut dyn Iterator<Item = &'a [u8]>,
     /// The path, the text and the loader of each JavaScript, TypeScript and JSON file of the
-    /// bundle, which the type checker takes instead of reading the file again.
+    /// bundle, which the type checker takes instead of reading the file again. A file of `files`
+    /// of `Bun.build` is as it is written there, whatever loads it: also one that the bundle does
+    /// not load, and a page.
     pub sources: &'i mut dyn Iterator<Item = (&'a [u8], &'a [u8], Loader)>,
 }
 

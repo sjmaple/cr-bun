@@ -1,5 +1,6 @@
 import { describe, expect, test } from "bun:test";
-import { bunEnv, bunExe, tempDir } from "harness";
+import { bunEnv, bunExe, isWindows, tempDir } from "harness";
+import { join, relative } from "node:path";
 
 describe("bundler files option", () => {
   test("basic in-memory file bundling", async () => {
@@ -600,6 +601,361 @@ describe("bundler files option", () => {
 
     const output = await result.outputs[0].text();
     expect(output).toContain("injected by plugin");
+  });
+
+  // `check: true` type checks what is written: in `files`, or else on disk. What an onLoad plugin returns is what is
+  // bundled. It is checked only where the file is written nowhere.
+  describe("check: true", () => {
+    // Without the libraries of TypeScript, which take seconds to load in a debug build. `globals.d.ts` has the types
+    // that TypeScript asks for then.
+    const options = {
+      strict: true,
+      noEmit: true,
+      target: "esnext",
+      module: "esnext",
+      moduleResolution: "bundler",
+      noLib: true,
+      types: [],
+      skipLibCheck: true,
+      allowImportingTsExtensions: true,
+      resolveJsonModule: true,
+    };
+    const globals = [
+      "Array<T>",
+      "Boolean",
+      "CallableFunction",
+      "Function",
+      "IArguments",
+      "ImportAttributes",
+      "NewableFunction",
+      "Number",
+      "Object",
+      "RegExp",
+      "String",
+    ]
+      .map(name => `interface ${name} {}\n`)
+      .join("");
+
+    // Each text has an error of its own, which names where the text is from.
+    const text = (from: string) => `export const value: "${from}" = 1;\n`;
+    const wrong = (from: string, file = "lib.ts") => `TS2322: Type '1' is not assignable to type '"${from}"'. ${file}`;
+    const notFound = (specifier: string) =>
+      `TS2307: Cannot find module '${specifier}' or its corresponding type declarations. main.ts`;
+
+    type Plugin = (build: Bun.PluginBuilder, dir: string) => void;
+    type Project = {
+      /** The files on disk, besides `tsconfig.json` and `globals.d.ts`. */
+      disk: Record<string, string>;
+      /** `files`, by the name of each in the project. */
+      files?: Record<string, string>;
+      plugin?: Plugin;
+      entry?: string;
+      target?: Bun.Target;
+    };
+    /** `errors`: the message and the file of each. */
+    type Row = Project & { name: string; errors: string[] };
+
+    async function errorsOf({ disk, files = {}, plugin, entry = "main.ts", target }: Project) {
+      using project = tempDir("bundler-files-check", {
+        "tsconfig.json": JSON.stringify({ compilerOptions: options }),
+        "globals.d.ts": globals,
+        ...disk,
+      });
+      const dir = String(project);
+      const built = await Bun.build({
+        entrypoints: [`${dir}/${entry}`],
+        target,
+        check: true,
+        throw: false,
+        files: Object.fromEntries(Object.entries(files).map(([file, text]) => [`${dir}/${file}`, text])),
+        plugins: plugin ? [{ name: "plugin", setup: build => plugin(build, dir) }] : [],
+      });
+      return built.logs.map(log => `${log.message} ${relative(dir, log.position?.file ?? "").replaceAll("\\", "/")}`);
+    }
+
+    const main = `export { value } from "./lib.ts";\n`;
+    const returns =
+      (contents: string, loader: Bun.Loader = "ts"): Plugin =>
+      build => {
+        build.onLoad({ filter: /lib[.]ts$/ }, () => ({ contents, loader }));
+      };
+
+    describe("the text of a file that is checked", () => {
+      const inFiles = { disk: { "main.ts": main }, files: { "lib.ts": text("files") }, errors: [wrong("files")] };
+      const onDisk = { disk: { "main.ts": main, "lib.ts": text("disk") } };
+      const rows: Row[] = [
+        { name: "in `files`", ...inFiles },
+        { name: "on disk and in `files`", ...inFiles, ...onDisk },
+        { name: "on disk, and a plugin loads it", ...onDisk, plugin: returns(text("plugin")), errors: [wrong("disk")] },
+        {
+          name: "only a plugin provides it",
+          disk: { "main.ts": main },
+          plugin(build, dir) {
+            build.onResolve({ filter: /lib[.]ts$/ }, () => ({ path: `${dir}/lib.ts` }));
+            returns(text("plugin"))(build, dir);
+          },
+          errors: [wrong("plugin")],
+        },
+        { name: "in `files`, and a plugin loads it", ...inFiles, plugin: returns(text("plugin")) },
+        {
+          name: "on disk and in `files`, and a plugin loads it",
+          ...inFiles,
+          ...onDisk,
+          plugin: returns(text("plugin")),
+        },
+        {
+          name: "in `files`, and a plugin loads it after defer()",
+          ...inFiles,
+          plugin(build) {
+            build.onLoad({ filter: /lib[.]ts$/ }, async ({ defer }) => {
+              await defer();
+              return { contents: text("plugin"), loader: "ts" };
+            });
+          },
+        },
+        {
+          name: "in `files`, and a plugin declines to load it",
+          ...inFiles,
+          plugin(build) {
+            build.onLoad({ filter: /lib[.]ts$/ }, () => undefined);
+          },
+        },
+        {
+          name: "in `files`, and a plugin loads it as JavaScript",
+          ...inFiles,
+          plugin: returns(`export const value = 1;\n`, "js"),
+        },
+        { name: "in `files`, and a plugin loads it as TSX", ...inFiles, plugin: returns(text("plugin"), "tsx") },
+        {
+          name: "in `files`, and a plugin loads it as an object",
+          ...inFiles,
+          plugin(build) {
+            build.onLoad({ filter: /lib[.]ts$/ }, () => ({ exports: { value: 1 }, loader: "object" }));
+          },
+        },
+        {
+          name: "in `files`, and a plugin loads it as text",
+          ...inFiles,
+          disk: { "main.ts": `import * as lib from "./lib.ts";\nexport default lib;\n` },
+          plugin: returns("plugin", "text"),
+        },
+        {
+          name: "in `files`, and a plugin resolves an import to it and loads it",
+          ...inFiles,
+          disk: { "main.ts": `export { value } from "./lib";\n` },
+          plugin(build, dir) {
+            build.onResolve({ filter: /^[.][/]lib$/ }, () => ({ path: `${dir}/lib.ts` }));
+            returns(text("plugin"))(build, dir);
+          },
+        },
+        {
+          name: "the entry point, in `files`, and a plugin loads it",
+          ...inFiles,
+          disk: {},
+          plugin: returns(text("plugin")),
+          entry: "lib.ts",
+        },
+        {
+          name: "the entry point, on disk and in `files`, and a plugin loads it",
+          ...inFiles,
+          disk: { "lib.ts": text("disk") },
+          plugin: returns(text("plugin")),
+          entry: "lib.ts",
+        },
+      ];
+      test.each(rows)("$name", async row => {
+        expect(await errorsOf(row)).toEqual(row.errors);
+      });
+
+      // `onBeforeParse` of a native plugin replaces the text that is bundled.
+      const cc = Bun.which("cc") || Bun.which("gcc") || Bun.which("clang");
+      test.skipIf(isWindows || !cc)("in `files`, and a native plugin replaces its text", async () => {
+        using addon = tempDir("bundler-files-check-native", {
+          "replace.c": `
+            #include "bundler_plugin.h"
+            #define EXPORT __attribute__((visibility("default")))
+            EXPORT const char *BUN_PLUGIN_NAME = "replace";
+            EXPORT void *napi_register_module_v1(void *env, void *exports) { return exports; }
+            static const char text[] = ${JSON.stringify(text("plugin"))};
+            EXPORT void replace(const OnBeforeParseArguments *args, OnBeforeParseResult *result) {
+              result->source_ptr = (uint8_t *)text;
+              result->source_len = sizeof(text) - 1;
+              result->loader = BUN_LOADER_TS;
+            }
+          `,
+        });
+        const header = join(import.meta.dir, "../../packages/bun-native-bundler-plugin-api");
+        await using compiler = Bun.spawn({
+          cmd: [cc!, "-shared", "-fPIC", "-I", header, "-o", "replace.node", "replace.c"],
+          cwd: String(addon),
+          env: bunEnv,
+          stderr: "pipe",
+        });
+        const [stderr, exitCode] = await Promise.all([compiler.stderr.text(), compiler.exited]);
+        expect({ stderr, exitCode }).toEqual({ stderr: "", exitCode: 0 });
+        const napiModule = require(`${addon}/replace.node`);
+        const errors = await errorsOf({
+          ...inFiles,
+          plugin(build) {
+            build.onBeforeParse({ filter: /lib[.]ts$/ }, { napiModule, symbol: "replace" });
+          },
+        });
+        expect(errors).toEqual([wrong("files")]);
+      });
+    });
+
+    test("what the text in `files` imports is checked, not what the text of a plugin imports", async () => {
+      const errors = await errorsOf({
+        disk: { "main.ts": main, "dep.ts": `export const dep: "dep" = 1;\n` },
+        files: { "lib.ts": `export { dep as value } from "./dep.ts";\n` },
+        plugin: returns(`export const value = 1;\n`),
+      });
+      expect(errors).toEqual([wrong("dep", "dep.ts")]);
+    });
+
+    // The bundler does not load a file that only types need. The type checker reads it: from `files`, like the bundler
+    // would.
+    describe("a file of `files` that the bundle does not load", () => {
+      const ambient = (from: string) => `declare const ambient: "${from}";\n`;
+      const kinds = [
+        {
+          kind: "`import type`",
+          main: `import type { value } from "./lib.ts";\nexport type Value = typeof value;\n`,
+        },
+        {
+          kind: "an import that only a type uses",
+          main: `import { value } from "./lib.ts";\nexport type Value = typeof value;\n`,
+        },
+        { kind: "`export type`", main: `export type { value } from "./lib.ts";\n` },
+        {
+          kind: "an ambient declaration",
+          main: `export const value: typeof ambient = 1;\n`,
+          file: "ambient.d.ts",
+          of: ambient,
+          error: wrong("files", "main.ts"),
+        },
+        {
+          kind: 'an import with { type: "text" }',
+          main: `import * as lib from "./lib.ts" with { type: "text" };\nexport default lib;\n`,
+        },
+      ];
+      const rows = kinds.flatMap(({ kind, main, file = "lib.ts", of = text, error = wrong("files") }): Row[] => [
+        { name: `${kind}, in \`files\``, disk: { "main.ts": main }, files: { [file]: of("files") }, errors: [error] },
+        {
+          name: `${kind}, on disk and in \`files\``,
+          disk: { "main.ts": main, [file]: of("disk") },
+          files: { [file]: of("files") },
+          errors: [error],
+        },
+      ]);
+      test.each(rows)("$name", async row => {
+        expect(await errorsOf(row)).toEqual(row.errors);
+      });
+
+      test("a JSON file that only a type uses", async () => {
+        const errors = await errorsOf({
+          disk: { "main.ts": `import data from "./data.json";\nexport const name: typeof data.name = 1;\n` },
+          files: { "data.json": `{ "name": "files" }\n` },
+        });
+        expect(errors).toEqual([`TS2322: Type 'number' is not assignable to type 'string'. main.ts`]);
+      });
+    });
+
+    // The type checker cannot read `App.svelte`, on disk or in `files`: a declaration stands for it.
+    describe("a component that a plugin compiles", () => {
+      const main = `export { default } from "./App.svelte";\n`;
+      const component = `<script lang="ts">let count: number = 1;</script>\n`;
+      const declaration = `declare module "*.svelte" {\n  const component: unknown;\n  export default component;\n}\n`;
+      const compiles: Plugin = build => {
+        const contents = `const component: "plugin" = 1;\nexport default component;\n`;
+        build.onLoad({ filter: /[.]svelte$/ }, () => ({ contents, loader: "ts" }));
+      };
+      const rows: Row[] = [
+        {
+          name: "on disk, with a declaration",
+          disk: { "main.ts": main, "App.svelte": component, "svelte.d.ts": declaration },
+          errors: [],
+        },
+        {
+          name: "in `files`, with a declaration on disk",
+          disk: { "main.ts": main, "svelte.d.ts": declaration },
+          files: { "App.svelte": component },
+          errors: [],
+        },
+        {
+          name: "in `files`, with a declaration in `files`",
+          disk: { "main.ts": main },
+          files: { "App.svelte": component, "svelte.d.ts": declaration },
+          errors: [],
+        },
+        {
+          name: "on disk, without a declaration",
+          disk: { "main.ts": main, "App.svelte": component },
+          errors: [notFound("./App.svelte")],
+        },
+        {
+          name: "in `files`, without a declaration",
+          disk: { "main.ts": main },
+          files: { "App.svelte": component },
+          errors: [notFound("./App.svelte")],
+        },
+      ];
+      test.each(rows)("$name", async row => {
+        expect(await errorsOf({ ...row, plugin: compiles })).toEqual(row.errors);
+      });
+    });
+
+    // A module that imports a page is checked with the scripts of the page.
+    describe("the scripts of a page that a server imports", () => {
+      const page = (script: string) => `<script type="module" src="./${script}"></script>\n`;
+      const disk = {
+        "server.ts": `import page from "./index.html";\nexport default page;\n`,
+        "html.d.ts": `declare module "*.html" {\n  const page: unknown;\n  export default page;\n}\n`,
+        "of-disk.ts": text("disk"),
+        "of-files.ts": text("files"),
+      };
+      const rows: Row[] = [
+        {
+          name: "the page is on disk",
+          disk: { ...disk, "index.html": page("of-disk.ts") },
+          errors: [wrong("disk", "of-disk.ts")],
+        },
+        {
+          name: "the page is in `files`",
+          disk,
+          files: { "index.html": page("of-files.ts") },
+          errors: [wrong("files", "of-files.ts")],
+        },
+        {
+          name: "the page is on disk and in `files`",
+          disk: { ...disk, "index.html": page("of-disk.ts") },
+          files: { "index.html": page("of-files.ts") },
+          errors: [wrong("files", "of-files.ts")],
+        },
+      ];
+      test.each(rows)("$name", async row => {
+        expect(await errorsOf({ ...row, entry: "server.ts", target: "bun" })).toEqual(row.errors);
+      });
+    });
+
+    // The bundler finds a file of `files` by the path that an import of it resolves to. A key that is another spelling
+    // of that path names no file of the bundle.
+    test("a key that is not the resolved path of the file is not a file of the project", async () => {
+      const errors = await errorsOf({
+        disk: { "main.ts": main, "lib.ts": text("disk") },
+        files: { "src/../lib.ts": text("files") },
+      });
+      expect(errors).toEqual([wrong("disk")]);
+    });
+
+    // The resolver of the bundler reads `tsconfig.json` from disk.
+    test("a `tsconfig.json` in `files` that the bundle does not load is not the one of the project", async () => {
+      const errors = await errorsOf({
+        disk: { "main.ts": `export function f(x) {\n  return x;\n}\n` },
+        files: { "tsconfig.json": JSON.stringify({ compilerOptions: { ...options, strict: false } }) },
+      });
+      expect(errors).toEqual([`TS7006: Parameter 'x' implicitly has an 'any' type. main.ts`]);
+    });
   });
 
   // Specifiers are joined onto the importer's directory to find a matching

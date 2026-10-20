@@ -3516,6 +3516,9 @@ declare module "bun" {
      * from the file that `tsconfig` names. The check also uses the `conditions`
      * and the `loader` of the build.
      *
+     * A file in `files` is checked as its text there. A plugin that loads a
+     * file changes what is bundled, not what is checked.
+     *
      * @default false
      *
      * @example

@@ -1058,6 +1058,22 @@ pub mod bv2_impl {
                     None
                 }
 
+                /// Whether a file beside the entry of `key` gets it for an import of its name, as
+                /// the type checker finds a file by its path. A relative key, or another spelling
+                /// of the path, is found only by a specifier that is the key.
+                pub(crate) fn is_found_by_path(
+                    &self,
+                    arena: &bun_alloc::Arena,
+                    key: &[u8],
+                ) -> bool {
+                    if !bun_paths::is_absolute_loose(key) {
+                        return false;
+                    }
+                    let name = [b"./", bun_paths::basename_posix(key)].concat();
+                    let found = self.resolve(arena, key, &name);
+                    found.is_some_and(|found| found.path_pair.primary.text == key)
+                }
+
                 /// Build a `bun_resolver::Result` for a matched key. `key` must
                 /// already satisfy `'static` — see [`resolve`], which copies the
                 /// map-owned key into the build's bump arena before calling here so
@@ -2581,15 +2597,46 @@ pub mod bv2_impl {
                 })
                 .map(|index| sources[index].path.text);
             // The types are those of what is written, as in `bun check`, not of what a plugin makes
-            // of it. What only a plugin provides is written nowhere else.
-            let mut sources = (sources.iter().zip(loaders).zip(flags))
-                .filter(|((source, loader), flags)| {
-                    loader.is_javascript_like_or_json()
-                        && source.path.is_file()
-                        && !(flags.contains(crate::Graph::InputFileFlags::IS_LOADED_BY_PLUGIN)
-                            && bun_sys::exists(source.path.text))
-                })
-                .map(|((source, loader), _)| (source.path.text, source.contents(), *loader));
+            // of it: in `files`, or else on the disk. What only a plugin provides is written nowhere
+            // else.
+            let file_map = self.file_map;
+            let by_name = &self.transpiler.options.loaders;
+            let written = move |index: usize| {
+                let (source, loader) = (&sources[index], loaders[index]);
+                let path = &source.path;
+                if !path.is_file() {
+                    return None;
+                }
+                let Some(text) = file_map.and_then(|files| files.get(path.text)) else {
+                    let is_on_disk = || is_loaded_by_plugin(index) && bun_sys::exists(path.text);
+                    let is_read = loader.is_javascript_like_or_json() && !is_on_disk();
+                    return is_read.then(|| (path.text, source.contents(), loader));
+                };
+                // The loader of a plugin is for what the plugin returned.
+                let loader = match is_loaded_by_plugin(index) {
+                    true => path.loader(by_name)?,
+                    false => loader,
+                };
+                // A module that imports a page is checked with the scripts that the page names.
+                let is_read = loader.is_javascript_like_or_json() || loader == Loader::Html;
+                is_read.then_some((path.text, text, loader))
+            };
+            // A file that only types need is not in the bundle, or it is there as something else.
+            // The type checker reads it where the bundler would: in `files`.
+            let (graphs, arena) = (&self.graph.build_graphs, self.arena());
+            let entries = file_map.into_iter().flat_map(|files| files.map.iter());
+            let only_in_files = entries.filter_map(move |(key, text)| {
+                let (key, text): (&[u8], &[u8]) = (key, text);
+                let loader = Fs::Path::init(key).loader(by_name)?;
+                // Not `tsconfig.json` or `package.json`: the resolver reads them from the disk.
+                let is_code = loader.is_javascript_like() || loader == Loader::Json;
+                let mut rows = graphs.values().filter_map(|graph| graph.get(key));
+                let is_read = is_code
+                    && !rows.any(|index| written(index as usize).is_some())
+                    && file_map?.is_found_by_path(arena, key);
+                is_read.then_some((key, text, loader))
+            });
+            let mut sources = only_in_files.chain((0..sources.len()).filter_map(written));
             let checked = options::TypeChecked {
                 cwd: self.transpiler.fs().top_level_dir,
                 tsconfig: self.transpiler.options.tsconfig_override.as_deref(),
