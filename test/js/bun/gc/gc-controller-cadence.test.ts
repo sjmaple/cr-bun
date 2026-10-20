@@ -604,7 +604,7 @@ test.skipIf(!isLinux || isASAN)(
 // the helpers'. A fixed number of markers makes the count the same on every machine. A debug build takes over 10 s to
 // allocate the 60 MB.
 describe.concurrent.skipIf(isDebug)("marking helper threads", () => {
-  async function collectionsOf(script: string, extraEnv: Record<string, string> = {}) {
+  async function run(script: string, extraEnv: Record<string, string> = {}) {
     await using proc = Bun.spawn({
       cmd: [bunExe(), "-e", script],
       env: { ...bunEnv, BUN_JSC_logGC: "1", BUN_JSC_numberOfGCMarkers: "4", BUN_GC_TIMER_DISABLE: "1", ...extraEnv },
@@ -615,14 +615,19 @@ describe.concurrent.skipIf(isDebug)("marking helper threads", () => {
     const log = stdout + stderr;
     expect(stdout, log).toContain("done");
     expect(exitCode, log).toBe(0);
-    // One collection runs from its START line to its END]. The last visitor line of it has its totals.
-    return [...log.matchAll(/START [A-Z] \d+kb => (\w+)Collection[\s\S]*?END\]/g)].map(([block, scope]) => {
+    // One collection runs from its START line to its END]. The last visitor line of it has its totals, and the END
+    // line has mw=, the number of times the collection woke a thread for its marking.
+    const collections = [...log.matchAll(/START [A-Z] \d+kb => (\w+)Collection[\s\S]*?END\]/g)].map(([block, scope]) => {
       const lines = [...block.matchAll(/v=(\d+)kb \(C:(\d+) M:\d+((?: P\d+:\d+)+)\)/g)];
       const [, markedKB, collectorKB, helpers] = lines[lines.length - 1];
       const helpersKB = [...helpers.matchAll(/:(\d+)/g)].reduce((sum, [, kb]) => sum + Number(kb), 0);
-      return { scope, markedKB: Number(markedKB), collectorKB: Number(collectorKB), helpersKB };
+      const markerWakeups = Number(block.match(/ mw=(\d+) p=[\d.]+ms \(max [\d.]+\), cycle [\d.]+ms END\]$/)?.[1]);
+      return { scope, markedKB: Number(markedKB), collectorKB: Number(collectorKB), helpersKB, markerWakeups };
     });
+    return { collections, voluntaryContextSwitches: Number(proc.resourceUsage()!.contextSwitches.voluntary) };
   }
+  const collectionsOf = async (script: string, extraEnv?: Record<string, string>) =>
+    (await run(script, extraEnv)).collections;
 
   // A ring of 1024 small objects replaced 200k times over: about 60 MB of short-lived objects, so about 7 eden
   // collections at the 8 MB budget, each with under 1 MB to mark (the ring is written, so it is remembered). The first
@@ -672,5 +677,64 @@ describe.concurrent.skipIf(isDebug)("marking helper threads", () => {
     const fulls = collections.filter(c => c.scope === "Full" && c.markedKB > 1024);
     expect(fulls.length, JSON.stringify(collections)).toBeGreaterThanOrEqual(1);
     for (const full of fulls) expect(full.helpersKB, JSON.stringify(full)).toBeGreaterThan(0);
+  });
+
+  // An LRU cache, churned: a Map over a doubly linked list of at most 4096 nodes, a fresh cache each round. Each
+  // collection marks a few MB, and a graph like this has next to nothing for a second thread. A marking thread used
+  // to wake every sleeping helper each time it shared a cell or two, one of them took the cells, and the others went
+  // back to sleep: about 220 thread wake-ups per collection with 8 markers, and each one is a system call for the
+  // thread that makes it. The program ran 2.2 times faster with one marker (oven-sh/bun#44893). Now a marking thread
+  // wakes one other thread each time it has visited 2 MB itself, and a helper that finds nothing shared leaves the
+  // collection. A thread that sleeps in a wait makes a voluntary context switch, so those count the wake-ups too.
+  test("are woken for the MB that a collection marks, not for every cell that is shared", async () => {
+    const { collections, voluntaryContextSwitches } = await run(
+      `
+      const CAPACITY = 4096, KEYS = 30000, OPS = 65536;
+      let seed = 12345;
+      const rand = () => (seed = (Math.imul(seed, 1103515245) + 12345) >>> 0) / 4294967296;
+      const stream = new Uint32Array(OPS);
+      for (let i = 0; i < OPS; i++) stream[i] = Math.floor(KEYS * rand() ** 3);
+      function round() {
+        const map = new Map();
+        const head = { prev: null, next: null }, tail = { prev: head, next: null };
+        head.next = tail;
+        let hits = 0;
+        for (let i = 0; i < OPS; i++) {
+          const key = stream[i];
+          let node = map.get(key);
+          if (node) {
+            hits++;
+            node.prev.next = node.next; node.next.prev = node.prev;
+          } else {
+            if (map.size === CAPACITY) {
+              const old = tail.prev;
+              old.prev.next = tail; tail.prev = old.prev;
+              map.delete(old.key);
+            }
+            node = { key, value: key, prev: null, next: null };
+            map.set(key, node);
+          }
+          node.next = head.next; node.prev = head;
+          head.next.prev = node; head.next = node;
+        }
+        return hits;
+      }
+      let hits = 0;
+      for (let r = 0; r < 60; r++) hits = round();
+      console.log("done", hits);
+    `,
+      { BUN_JSC_numberOfGCMarkers: "8" },
+    );
+    const summary = JSON.stringify({ voluntaryContextSwitches, collections });
+    // The collections this is about: the ones with more to mark than the first wake-up takes.
+    expect(collections.filter(c => c.markedKB >= 2048).length, summary).toBeGreaterThanOrEqual(10);
+    // About 5 per collection now. It was 160 to 175 with 8 markers. Windows does not count them.
+    if (!isWindows) expect(voluntaryContextSwitches / collections.length, summary).toBeLessThan(30);
+    const megabytesMarked = collections.reduce((sum, c) => sum + c.markedKB, 0) / 1024;
+    const markerWakeups = collections.reduce((sum, c) => sum + c.markerWakeups, 0);
+    // One wake-up per 2 MB, and one more where the mutator resumes with marking left and no marker at it. The bound
+    // leaves room for a smaller BUN_JSC_minimumBytesMarkedForParallelMarking, down to 1 MB.
+    expect(markerWakeups, summary).toBeLessThanOrEqual(megabytesMarked + 2 * collections.length);
+    for (const c of collections) expect(c.markerWakeups, summary).toBeLessThanOrEqual(c.markedKB / 1024 + 8);
   });
 });
