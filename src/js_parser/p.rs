@@ -4628,11 +4628,14 @@ impl<'a, const TYPESCRIPT: bool, const SCAN_ONLY: bool> P<'a, TYPESCRIPT, SCAN_O
         }
     }
 
-    /// A type that is named before the import statement is an unbound symbol linked to the binding.
+    #[inline]
     fn is_macro_ref(&self, r#ref: Ref) -> bool {
-        if self.macro_.refs.is_empty() {
-            return false;
-        }
+        !self.macro_.refs.is_empty() && self.is_linked_to_macro_ref(r#ref)
+    }
+
+    /// A type that is named before the import statement is an unbound symbol linked to the binding.
+    #[cold]
+    fn is_linked_to_macro_ref(&self, r#ref: Ref) -> bool {
         let mut r#ref = r#ref;
         loop {
             if self.macro_.refs.contains_key(&r#ref) {
