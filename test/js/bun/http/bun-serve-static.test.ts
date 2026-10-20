@@ -118,6 +118,18 @@ describe("static route Content-Type", () => {
     ["explicit header", () => new Response("hello", { headers: { "Content-Type": "text/foo" } }), "text/foo"],
     ["Response.json", () => Response.json({ a: 1 }), "application/json;charset=utf-8"],
     ["Uint8Array body", () => new Response(new Uint8Array([1, 2, 3])), null],
+    // slice() keeps the type of its parent only when that type is a registered MIME
+    // type. "text/x" is not one, so these slices have the empty type.
+    [
+      "typeless slice of a typed Blob",
+      () => new Response(new Blob(["hello world"], { type: "text/x" }).slice(0, 5)),
+      null,
+    ],
+    [
+      "empty typeless slice of a typed Blob",
+      () => new Response(new Blob(["hello world"], { type: "text/x" }).slice(0, 0)),
+      null,
+    ],
   ])("is stable across registrations: %s", async (_label, make, expected) => {
     const response = make();
 

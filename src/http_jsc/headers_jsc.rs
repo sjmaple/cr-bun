@@ -17,6 +17,7 @@ pub fn from_fetch_headers(
     fetch_headers: Option<&FetchHeaders>,
     body_content_type: Option<&[u8]>,
 ) -> Headers {
+    debug_assert!(body_content_type.is_none_or(|ct| !ct.is_empty()));
     // `FetchHeaders::{count,fast_has_,copy_to}` take `&mut self` but
     // are read-only FFI shims; cast through `*mut` (matching the prior
     // `link_interface!` impl which did `from_ref(h).cast_mut()`).

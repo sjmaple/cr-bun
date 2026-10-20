@@ -86,12 +86,10 @@ impl StaticRoute {
             options.headers,
             any_blob_content_type(&blob),
         );
-        if headers.get_content_type().is_none() {
-            if let Some(mime_type) = options.mime_type {
-                headers.append(b"Content-Type", &mime_type.value);
-            } else if blob.has_content_type_from_user() {
-                headers.append(b"Content-Type", blob.content_type());
-            }
+        if headers.get_content_type().is_none()
+            && let Some(mime_type) = options.mime_type
+        {
+            headers.append(b"Content-Type", &mime_type.value);
         }
 
         // Generate ETag if not already present

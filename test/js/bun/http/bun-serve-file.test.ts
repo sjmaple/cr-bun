@@ -1454,6 +1454,47 @@ test("file routes frame a slice that reaches or starts past EOF by the bytes the
   });
 });
 
+// A file route sends the type of its Blob. slice() keeps a `type` option only when
+// it is a registered MIME type. "text/x" is not one, so that slice has the empty type.
+test("file routes send no Content-Type for a file Blob whose type is empty", async () => {
+  using dir = tempDir("serve-file-route-empty-type", { "data.txt": "hello world" });
+  const path = join(String(dir), "data.txt");
+  expect(Bun.file(path, { type: "text/x" }).slice(0, 5).type).toBe("");
+  await using server = Bun.serve({
+    port: 0,
+    routes: {
+      "/type-option": new Response(Bun.file(path, { type: "text/x" })),
+      "/slice-of-type-option": new Response(Bun.file(path, { type: "text/x" }).slice(0, 5)),
+      "/slice-of-type-option-without-response": Bun.file(path, { type: "text/x" }).slice(0, 5),
+      "/slice-of-sniffed-type": new Response(Bun.file(path).slice(0, 5)),
+    },
+    fetch: () => new Response("fallback", { status: 404 }),
+  });
+
+  async function contentType(pathname: string, method: string) {
+    const res = await fetch(new URL(pathname, server.url), { method });
+    await res.arrayBuffer();
+    return res.headers.get("content-type");
+  }
+  const seen: Record<string, unknown> = {};
+  for (const pathname of [
+    "/type-option",
+    "/slice-of-type-option",
+    "/slice-of-type-option-without-response",
+    "/slice-of-sniffed-type",
+  ]) {
+    seen[pathname] = { GET: await contentType(pathname, "GET"), HEAD: await contentType(pathname, "HEAD") };
+  }
+
+  const both = (type: string | null) => ({ GET: type, HEAD: type });
+  expect(seen).toEqual({
+    "/type-option": both("text/x"),
+    "/slice-of-type-option": both(null),
+    "/slice-of-type-option-without-response": both(null),
+    "/slice-of-sniffed-type": both("text/plain;charset=utf-8"),
+  });
+});
+
 // A request that declares a body arms the request-body (onData) callback on
 // the uWS response before the fetch handler runs. uWS keeps a single shared
 // userdata slot per response, so when the handler returns a file response
