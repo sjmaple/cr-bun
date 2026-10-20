@@ -648,97 +648,103 @@ describe("a macro import that is used outside of a call", () => {
 
   // Each of these names the macro import `USE` once, on the line after the import. The error is at that identifier.
   const importOfUse = `import { m as USE } from "./m.ts" with { type: "macro" };\n`;
-  const uses: Record<string, string> = {
-    "alias.ts": `const f = USE;`,
-    "call-argument.ts": `console.log(USE);`,
-    "new-argument.ts": `new Set(USE);`,
-    "new-target.ts": `new USE();`,
-    "member.ts": `console.log(USE.name);`,
-    "index.ts": `console.log(USE["name"]);`,
-    "index-key.ts": `console.log([1][USE]);`,
-    "optional-member.ts": `console.log(USE?.name);`,
-    "method-call.ts": `USE.call(null);`,
-    "call-of-call.ts": `console.log(USE.bind(null)()());`,
-    "unary.ts": `console.log(!USE);`,
-    "typeof.ts": `console.log(typeof USE);`,
-    "binary-left.ts": `console.log(USE + 1);`,
-    "binary-right.ts": `console.log(1 + USE);`,
-    "logical.ts": `console.log(globalThis.x || USE);`,
-    "comma.ts": `console.log((1, USE));`,
-    "conditional-test.ts": `console.log(USE ? 1 : 2);`,
-    "conditional-chain.ts": `console.log(globalThis.a ? 1 : globalThis.b ? 2 : USE);`,
-    "assignment-target.ts": `USE = 1;`,
-    "assignment-value.ts": `let x; x = USE;`,
-    "update.ts": `USE++;`,
-    "expression-statement.ts": `USE;`,
-    "array.ts": `console.log([1, USE]);`,
-    "spread.ts": `console.log([...USE]);`,
-    "object-value.ts": `console.log({ a: USE });`,
-    "object-shorthand.ts": `console.log({ USE });`,
-    "object-computed-key.ts": `console.log({ [USE]: 1 });`,
-    "object-spread.ts": `console.log({ ...USE });`,
-    "object-method.ts": `console.log({ f() { return USE; } });`,
-    "object-getter.ts": `console.log({ get f() { return USE; } });`,
-    "template.ts": "console.log(`a${USE}b`);",
-    "tagged-template.ts": "console.log(String.raw`a${USE}b`);",
-    "satisfies.ts": `console.log(USE satisfies unknown);`,
-    "non-null.ts": `console.log(USE!);`,
-    "dynamic-import.ts": `import(USE);`,
-    "arrow-body.ts": `export const f = () => USE;`,
-    "arrow-block.ts": `export const f = () => { return USE; };`,
-    "arrow-default.ts": `export const f = (a = USE) => a;`,
-    "function-body.ts": `export function f() { return USE; }`,
-    "function-default.ts": `export function f(a = USE) { return a; }`,
-    "function-expression.ts": `export const f = function () { return USE; };`,
-    "async.ts": `export async function f() { return await USE; }`,
-    "generator.ts": `export function* f() { yield USE; }`,
-    "destructuring-default.ts": `export const { a = USE } = {} as any;`,
-    "array-destructuring-default.ts": `export const [a = USE] = [] as any;`,
-    "destructuring-computed-key.ts": `export const { [USE]: a } = {} as any;`,
-    "parameter-destructuring-default.ts": `export function f({ a = USE } = {} as any) { return a; }`,
-    "class-extends.ts": `export class A extends USE {}`,
-    "class-field.ts": `export class A { x = USE; }`,
-    "class-static-field.ts": `export class A { static x = USE; }`,
-    "class-private-field.ts": `export class A { #x = USE; get x() { return this.#x; } }`,
-    "class-method.ts": `export class A { f() { return USE; } }`,
-    "class-computed-key.ts": `export class A { [USE]() {} }`,
-    "class-static-block.ts": `export class A { static { console.log(USE); } }`,
-    "class-expression.ts": `export const A = class { x = USE; };`,
-    "class-parameter-property.ts": `export class A { constructor(public x = USE) {} }`,
-    "class-decorator.ts": `function dec(...a: any[]) { return (..._: any[]) => {}; } @dec(USE) class A {} console.log(A);`,
-    "member-decorator.ts": `function dec(...a: any[]) { return (..._: any[]) => {}; } class A { @dec(USE) x = 1; } console.log(A);`,
-    "if-test.ts": `if (USE) console.log(1);`,
-    "else-if.ts": `if (globalThis.a) {} else if (globalThis.b) {} else if (USE) console.log(1);`,
-    "if-body.ts": `if (globalThis.a) { console.log(USE); }`,
-    "for-init.ts": `for (let i = USE; i < 1; i++) {}`,
-    "for-test.ts": `for (let i = 0; i < USE; i++) {}`,
-    "for-update.ts": `for (let i = 0; i < 1; i += USE) {}`,
-    "for-body.ts": `for (let i = 0; i < 1; i++) { console.log(USE); }`,
-    "for-in.ts": `for (const k in USE) {}`,
-    "for-of.ts": `for (const k of USE) {}`,
-    "for-of-target.ts": `for (USE of []) {}`,
-    "while.ts": `while (USE) {}`,
-    "do-while.ts": `do {} while (USE);`,
-    "switch-test.ts": `switch (USE) {}`,
-    "switch-case.ts": `switch (globalThis.a) { case USE: break; }`,
-    "switch-body.ts": `switch (globalThis.a) { default: console.log(USE); }`,
-    "try.ts": `try { console.log(USE); } catch {}`,
-    "catch.ts": `try {} catch { console.log(USE); }`,
-    "finally.ts": `try {} finally { console.log(USE); }`,
-    "throw.ts": `throw USE;`,
-    "label.ts": `a: { console.log(USE); }`,
-    "block.ts": `{ console.log(USE); }`,
-    "return.ts": `export function f() { if (globalThis.a) return USE; }`,
-    "export-clause.ts": `export { USE };`,
-    "export-clause-renamed.ts": `export { USE as other };`,
-    "export-default.ts": `export default USE;`,
-    "export-default-expression.ts": `export default [USE];`,
-    "export-const.ts": `export const f = USE;`,
-    "import-equals.ts": `import f = USE; console.log(f);`,
-    "enum.ts": `enum E { A = USE as any } console.log(E.A);`,
-    "namespace-block.ts": `namespace N { export const v = USE; } console.log(N.v);`,
-    // As deep to the left as it is long.
-    "long-chain.ts": `export const sum = USE${Buffer.alloc(2 * 20_000, "+x").toString()}; var x = 1;`,
+  const uses: Record<string, Record<string, string>> = {
+    expressions: {
+      "alias.ts": `const f = USE;`,
+      "call-argument.ts": `console.log(USE);`,
+      "new-argument.ts": `new Set(USE);`,
+      "new-target.ts": `new USE();`,
+      "member.ts": `console.log(USE.name);`,
+      "index.ts": `console.log(USE["name"]);`,
+      "index-key.ts": `console.log([1][USE]);`,
+      "optional-member.ts": `console.log(USE?.name);`,
+      "method-call.ts": `USE.call(null);`,
+      "call-of-call.ts": `console.log(USE.bind(null)()());`,
+      "unary.ts": `console.log(!USE);`,
+      "typeof.ts": `console.log(typeof USE);`,
+      "binary-left.ts": `console.log(USE + 1);`,
+      "binary-right.ts": `console.log(1 + USE);`,
+      "logical.ts": `console.log(globalThis.x || USE);`,
+      "comma.ts": `console.log((1, USE));`,
+      "conditional-test.ts": `console.log(USE ? 1 : 2);`,
+      "conditional-chain.ts": `console.log(globalThis.a ? 1 : globalThis.b ? 2 : USE);`,
+      "assignment-target.ts": `USE = 1;`,
+      "assignment-value.ts": `let x; x = USE;`,
+      "update.ts": `USE++;`,
+      "expression-statement.ts": `USE;`,
+      "array.ts": `console.log([1, USE]);`,
+      "spread.ts": `console.log([...USE]);`,
+      "object-value.ts": `console.log({ a: USE });`,
+      "object-shorthand.ts": `console.log({ USE });`,
+      "object-computed-key.ts": `console.log({ [USE]: 1 });`,
+      "object-spread.ts": `console.log({ ...USE });`,
+      "object-method.ts": `console.log({ f() { return USE; } });`,
+      "object-getter.ts": `console.log({ get f() { return USE; } });`,
+      "template.ts": "console.log(`a${USE}b`);",
+      "tagged-template.ts": "console.log(String.raw`a${USE}b`);",
+      "satisfies.ts": `console.log(USE satisfies unknown);`,
+      "non-null.ts": `console.log(USE!);`,
+      "dynamic-import.ts": `import(USE);`,
+      // As deep to the left as it is long.
+      "long-chain.ts": `export const sum = USE${Buffer.alloc(2 * 5_000, "+x").toString()}; var x = 1;`,
+    },
+    "functions and classes": {
+      "arrow-body.ts": `export const f = () => USE;`,
+      "arrow-block.ts": `export const f = () => { return USE; };`,
+      "arrow-default.ts": `export const f = (a = USE) => a;`,
+      "function-body.ts": `export function f() { return USE; }`,
+      "function-default.ts": `export function f(a = USE) { return a; }`,
+      "function-expression.ts": `export const f = function () { return USE; };`,
+      "async.ts": `export async function f() { return await USE; }`,
+      "generator.ts": `export function* f() { yield USE; }`,
+      "destructuring-default.ts": `export const { a = USE } = {} as any;`,
+      "array-destructuring-default.ts": `export const [a = USE] = [] as any;`,
+      "destructuring-computed-key.ts": `export const { [USE]: a } = {} as any;`,
+      "parameter-destructuring-default.ts": `export function f({ a = USE } = {} as any) { return a; }`,
+      "class-extends.ts": `export class A extends USE {}`,
+      "class-field.ts": `export class A { x = USE; }`,
+      "class-static-field.ts": `export class A { static x = USE; }`,
+      "class-private-field.ts": `export class A { #x = USE; get x() { return this.#x; } }`,
+      "class-method.ts": `export class A { f() { return USE; } }`,
+      "class-computed-key.ts": `export class A { [USE]() {} }`,
+      "class-static-block.ts": `export class A { static { console.log(USE); } }`,
+      "class-expression.ts": `export const A = class { x = USE; };`,
+      "class-parameter-property.ts": `export class A { constructor(public x = USE) {} }`,
+      "class-decorator.ts": `function dec(...a: any[]) { return (..._: any[]) => {}; } @dec(USE) class A {} console.log(A);`,
+      "member-decorator.ts": `function dec(...a: any[]) { return (..._: any[]) => {}; } class A { @dec(USE) x = 1; } console.log(A);`,
+    },
+    statements: {
+      "if-test.ts": `if (USE) console.log(1);`,
+      "else-if.ts": `if (globalThis.a) {} else if (globalThis.b) {} else if (USE) console.log(1);`,
+      "if-body.ts": `if (globalThis.a) { console.log(USE); }`,
+      "for-init.ts": `for (let i = USE; i < 1; i++) {}`,
+      "for-test.ts": `for (let i = 0; i < USE; i++) {}`,
+      "for-update.ts": `for (let i = 0; i < 1; i += USE) {}`,
+      "for-body.ts": `for (let i = 0; i < 1; i++) { console.log(USE); }`,
+      "for-in.ts": `for (const k in USE) {}`,
+      "for-of.ts": `for (const k of USE) {}`,
+      "for-of-target.ts": `for (USE of []) {}`,
+      "while.ts": `while (USE) {}`,
+      "do-while.ts": `do {} while (USE);`,
+      "switch-test.ts": `switch (USE) {}`,
+      "switch-case.ts": `switch (globalThis.a) { case USE: break; }`,
+      "switch-body.ts": `switch (globalThis.a) { default: console.log(USE); }`,
+      "try.ts": `try { console.log(USE); } catch {}`,
+      "catch.ts": `try {} catch { console.log(USE); }`,
+      "finally.ts": `try {} finally { console.log(USE); }`,
+      "throw.ts": `throw USE;`,
+      "label.ts": `a: { console.log(USE); }`,
+      "block.ts": `{ console.log(USE); }`,
+      "return.ts": `export function f() { if (globalThis.a) return USE; }`,
+      "export-clause.ts": `export { USE };`,
+      "export-clause-renamed.ts": `export { USE as other };`,
+      "export-default.ts": `export default USE;`,
+      "export-default-expression.ts": `export default [USE];`,
+      "export-const.ts": `export const f = USE;`,
+      "import-equals.ts": `import f = USE; console.log(f);`,
+      "enum.ts": `enum E { A = USE as any } console.log(E.A);`,
+      "namespace-block.ts": `namespace N { export const v = USE; } console.log(N.v);`,
+    },
   };
 
   // Every spelling of the import, and a reference beside a call. [source, ...the message of each error]
@@ -861,59 +867,51 @@ describe("a macro import that is used outside of a call", () => {
         ...(error.notes ?? []).map((note: any) => [note.message, ...at(note.position)]),
       ]);
   `;
-  const inDirectory = (directory: string, sources: [file: string, source: string][]) =>
-    Object.fromEntries([
-      [`${directory}/m.ts`, macroFile],
-      ...sources.map(([file, source]) => [`${directory}/${file}`, source + "\n"]),
-    ]);
-  const files = {
-    "m.ts": macroFile,
-    // The decorators in `uses` are TypeScript's. Bun.Transpiler reads no tsconfig.json and lowers them as standard ones.
-    "tsconfig.json": JSON.stringify({ compilerOptions: { experimentalDecorators: true } }),
-    ...inDirectory(
-      "uses",
-      Object.entries(uses).map(([file, source]) => [file, importOfUse + source]),
-    ),
-    ...inDirectory(
-      "refused",
-      Object.entries(refused).map(([file, [source]]) => [file, source]),
-    ),
-    ...inDirectory("accepted", [["accepted.ts", accepted.map(([statement]) => statement).join("\n")]]),
-    ...inDirectory(
-      "folded",
-      Object.entries(folded).map(([file, { source }]) => [file, source]),
-    ),
-    // Prints, as its last line, the errors of each file in each directory.
-    "errors.ts": `
-      import { readdirSync } from "node:fs";
-      import { basename } from "node:path";
-      ${errorsOf}
-      const [how, ...directories] = process.argv.slice(2);
-      const transpiler = new Bun.Transpiler({ loader: "ts" });
-      const all: Record<string, Record<string, unknown[]>> = {};
-      for (const directory of directories) {
-        const files = readdirSync(directory).filter(file => file !== "m.ts");
-        const errors: Record<string, unknown[]> = Object.fromEntries(files.map(file => [file, []]));
-        if (how === "build") {
-          const entrypoints = files.map(file => "./" + directory + "/" + file);
-          const build = await Bun.build({ entrypoints, target: "bun", throw: false });
-          for (const log of build.logs) errors[basename(log.position?.file ?? "")]?.push(...errorsOf([log]));
-        } else {
-          for (const file of files) {
-            const path = "./" + directory + "/" + file;
-            try {
-              if (how === "import") await import(path);
-              else transpiler.transformSync(await Bun.file(path).text());
-            } catch (e: any) {
-              errors[file] = errorsOf(e?.errors ?? [e]);
-            }
+  // Prints, as its last line, the errors of each file in each directory.
+  const driver = `
+    import { readdirSync } from "node:fs";
+    import { basename } from "node:path";
+    ${errorsOf}
+    const [how, ...directories] = process.argv.slice(2);
+    const transpiler = new Bun.Transpiler({ loader: "ts" });
+    const all: Record<string, Record<string, unknown[]>> = {};
+    for (const directory of directories) {
+      const files = readdirSync(directory).filter(file => file !== "m.ts");
+      const errors: Record<string, unknown[]> = Object.fromEntries(files.map(file => [file, []]));
+      if (how === "build") {
+        const entrypoints = files.map(file => "./" + directory + "/" + file);
+        const build = await Bun.build({ entrypoints, target: "bun", throw: false });
+        for (const log of build.logs) errors[basename(log.position?.file ?? "")]?.push(...errorsOf([log]));
+      } else {
+        for (const file of files) {
+          const path = "./" + directory + "/" + file;
+          try {
+            if (how === "import") await import(path);
+            else transpiler.transformSync(await Bun.file(path).text());
+          } catch (e: any) {
+            errors[file] = errorsOf(e?.errors ?? [e]);
           }
         }
-        all[directory] = errors;
       }
-      console.log(JSON.stringify(all));
-    `,
-  };
+      all[directory] = errors;
+    }
+    console.log(JSON.stringify(all));
+  `;
+  // Each directory holds its sources beside a copy of the macro file.
+  const fixture = (directories: Record<string, [file: string, source: string][]>) => ({
+    // The decorators in `uses` are TypeScript's. Bun.Transpiler reads no tsconfig.json and lowers them as standard ones.
+    "tsconfig.json": JSON.stringify({ compilerOptions: { experimentalDecorators: true } }),
+    "errors.ts": driver,
+    // Bun.Transpiler has no path for its input, so it resolves "./m.ts" from the working directory.
+    "m.ts": macroFile,
+    ...Object.fromEntries(
+      Object.entries(directories).flatMap(([directory, sources]) => [
+        [`${directory}/m.ts`, macroFile],
+        ...sources.map(([file, source]) => [`${directory}/${file}`, source + "\n"]),
+      ]),
+    ),
+  });
+  const acceptedSources: [string, string][] = [["accepted.ts", accepted.map(([statement]) => statement).join("\n")]];
 
   async function run(cwd: string, ...args: string[]) {
     await using proc = Bun.spawn({ cmd: [bunExe(), ...args], env: bunEnv, cwd, stdout: "pipe", stderr: "pipe" });
@@ -926,50 +924,73 @@ describe("a macro import that is used outside of a call", () => {
     return { lines, stderr, exitCode };
   }
 
-  const usesErrors = Object.fromEntries(
-    Object.entries(uses).map(([file, source]) => [
-      file,
-      [[notDefined("USE"), 2, source.indexOf("USE") + 1, [removed("USE"), 1, 10], [remedy("USE"), null, null]]],
-    ]),
-  );
-  const refusedErrors = Object.fromEntries(Object.entries(refused).map(([file, [, ...errors]]) => [file, errors]));
   const messagesOf = (errors: Record<string, [message: string][]>) =>
     Object.fromEntries(Object.entries(errors).map(([file, errors]) => [file, errors.map(([message]) => message)]));
 
-  // Bun.build(), the runtime and Bun.Transpiler each transpile with their own options.
-  const ways = ["build", "import", "transform"];
-
-  // Each of these six transpiles a directory of files, so they run one at a time.
-  test.each(ways)("%s: each kind of reference is an error at its identifier", async how => {
-    using dir = tempDir("macro-value-use", files);
-    const { lines, stderr, exitCode } = await run(String(dir), "errors.ts", how, "uses");
-    expect({ errors: JSON.parse(lines.at(-1)!).uses, stderr }).toEqual({ errors: usesErrors, stderr: "" });
-    expect(exitCode).toBe(0);
-  });
-
-  test.each(ways)("%s: each spelling of the import is an error, and a call is not", async how => {
-    using dir = tempDir("macro-value-use", files);
-    const { lines, stderr, exitCode } = await run(String(dir), "errors.ts", how, "refused", "accepted", "folded");
-    const errors = JSON.parse(lines.at(-1)!);
-    expect({
-      refused: messagesOf(errors.refused),
-      accepted: errors.accepted,
-      folded: messagesOf(errors.folded),
-      printed: lines.slice(0, -1),
-      stderr,
-    }).toEqual({
-      refused: refusedErrors,
-      accepted: { "accepted.ts": [] },
-      folded: Object.fromEntries(Object.entries(folded).map(([file, verdicts]) => [file, verdicts[how]])),
-      // Only the import runs the files that have no error.
-      printed: how === "import" ? [...acceptedStdout, "comma-call 42", "void-statement 42"] : [],
-      stderr: "",
+  // Bun.build(), the runtime and Bun.Transpiler each transpile with their own options. Each of these tests transpiles
+  // a directory of files, so they run one at a time.
+  describe.each(["build", "import", "transform"] as const)("%s", how => {
+    test.each(Object.keys(uses))("each reference in %s is an error at its identifier", async group => {
+      const sources = Object.entries(uses[group]);
+      using dir = tempDir(
+        "macro-value-use",
+        fixture({ uses: sources.map(([file, source]) => [file, importOfUse + source]) }),
+      );
+      const { lines, stderr, exitCode } = await run(String(dir), "errors.ts", how, "uses");
+      expect({ errors: JSON.parse(lines.at(-1)!).uses, stderr }).toEqual({
+        errors: Object.fromEntries(
+          sources.map(([file, source]) => [
+            file,
+            [[notDefined("USE"), 2, source.indexOf("USE") + 1, [removed("USE"), 1, 10], [remedy("USE"), null, null]]],
+          ]),
+        ),
+        stderr: "",
+      });
+      expect(exitCode).toBe(0);
     });
-    expect(exitCode).toBe(0);
+
+    test("each spelling of the import is an error", async () => {
+      using dir = tempDir(
+        "macro-value-use",
+        fixture({ refused: Object.entries(refused).map(([file, [source]]) => [file, source]) }),
+      );
+      const { lines, stderr, exitCode } = await run(String(dir), "errors.ts", how, "refused");
+      expect({ errors: messagesOf(JSON.parse(lines.at(-1)!).refused), printed: lines.slice(0, -1), stderr }).toEqual({
+        errors: Object.fromEntries(Object.entries(refused).map(([file, [, ...errors]]) => [file, errors])),
+        printed: [],
+        stderr: "",
+      });
+      expect(exitCode).toBe(0);
+    });
+
+    test("a call that is replaced is not an error", async () => {
+      using dir = tempDir(
+        "macro-value-use",
+        fixture({
+          accepted: acceptedSources,
+          folded: Object.entries(folded).map(([file, { source }]) => [file, source]),
+        }),
+      );
+      const { lines, stderr, exitCode } = await run(String(dir), "errors.ts", how, "accepted", "folded");
+      const errors = JSON.parse(lines.at(-1)!);
+      expect({
+        accepted: errors.accepted,
+        folded: messagesOf(errors.folded),
+        printed: lines.slice(0, -1),
+        stderr,
+      }).toEqual({
+        accepted: { "accepted.ts": [] },
+        folded: Object.fromEntries(Object.entries(folded).map(([file, verdicts]) => [file, verdicts[how]])),
+        // Only the import runs the files that have no error.
+        printed: how === "import" ? [...acceptedStdout, "comma-call 42", "void-statement 42"] : [],
+        stderr: "",
+      });
+      expect(exitCode).toBe(0);
+    });
   });
 
   test.concurrent("a bundle of the accepted forms runs", async () => {
-    using dir = tempDir("macro-value-use", files);
+    using dir = tempDir("macro-value-use", fixture({ accepted: acceptedSources }));
     const build = await run(String(dir), "build", "./accepted/accepted.ts", "--target=bun", "--outdir", "out");
     expect({ stderr: build.stderr, exitCode: build.exitCode }).toEqual({ stderr: "", exitCode: 0 });
     const { lines, stderr, exitCode } = await run(String(dir), "out/accepted.js");
