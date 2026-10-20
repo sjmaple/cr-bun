@@ -1229,6 +1229,19 @@ impl<'a> PackageInstall<'a> {
         matches(&bun_tag_file.bytes)
     }
 
+    /// The text of the package.json of the installed copy.
+    pub(crate) fn installed_package_json(&self, root_node_modules_dir: &Dir) -> Option<Vec<u8>> {
+        let mut spill = Vec::new();
+        let path = path::resolve_path::join_z_spill::<path::platform::Posix>(
+            &mut spill,
+            &[self.destination_dir_subpath.as_bytes(), b"package.json"],
+        );
+        let file = (self.node_modules)
+            .read_small_file(root_node_modules_dir, path)
+            .ok()?;
+        file.err.is_none().then_some(file.bytes)
+    }
+
     pub(crate) fn verify(
         &mut self,
         resolution: &Resolution,

@@ -2483,6 +2483,26 @@ pub(crate) fn install_isolated_packages(
                         {
                             installer.summary.offline_misses.in_place.push(pkg_id);
                         }
+                        if matches!(patch_info, PatchInfo::None)
+                            && installer.manager().lacks_recorded_version(pkg_id)
+                        {
+                            let mut json_path: AbsPath = AbsPath::init_top_level_dir();
+                            if uses_global_store {
+                                installer.append_global_store_entry_path(
+                                    &mut json_path,
+                                    entry_id,
+                                    Which::Final,
+                                );
+                            } else {
+                                installer.append_local_store_entry_path(&mut json_path, entry_id);
+                            }
+                            json_path.append(b"node_modules").assume_ok();
+                            json_path.append(pkg_name.slice(string_buf)).assume_ok();
+                            json_path.append(b"package.json").assume_ok();
+                            if let Ok(json) = sys::File::read_from(Fd::cwd(), json_path.slice()) {
+                                installer.manager_mut().queue_version(pkg_id, Some(&json));
+                            }
+                        }
                         let mut state = CompleteState::Skipped;
                         if uses_global_store {
                             // Warm hit: the global virtual store already holds
@@ -2548,6 +2568,17 @@ pub(crate) fn install_isolated_packages(
                     };
 
                     if !missing_from_cache {
+                        // The cache entry is about to be installed as the package of this row.
+                        if installer.manager().lacks_recorded_version(pkg_id) {
+                            let mut spill = Vec::new();
+                            let path = paths::resolve_path::join_z_spill::<paths::platform::Auto>(
+                                &mut spill,
+                                &[cache_subpath_z.as_bytes(), b"package.json"],
+                            );
+                            if let Ok(json) = sys::File::read_from(cache_dir, path.as_bytes()) {
+                                installer.manager_mut().queue_version(pkg_id, Some(&json));
+                            }
+                        }
                         match installer.apply_package_patch(entry_id, &patch_info) {
                             Ok(()) => installer.start_task(entry_id),
                             Err(err) => installer.on_task_fail(entry_id, &err),

@@ -180,8 +180,10 @@ impl PackageManager {
                 _ => false,
             };
             if !(from_lockfile && moved) {
-                // A row from before the version was recorded.
-                if package.meta.has_recorded_version() && !existing.meta.has_recorded_version() {
+                // The row has no version, or one that a migrator took from another lockfile.
+                let buf = self.lockfile.buffers.string_bytes.as_slice();
+                let version = package.meta.recorded_version(buf);
+                if version.is_some() && version != existing.meta.recorded_version(buf) {
                     existing
                         .meta
                         .record_version(package.meta.package_json_version);
@@ -502,37 +504,92 @@ impl PackageManager {
         }
     }
 
-    /// Queued, not appended: the installers' tasks still read the lockfile string buffer.
-    pub(crate) fn queue_extracted_version(&mut self, package_id: PackageID, data: &ExtractData) {
+    /// `package_json` is from bytes that bun.lock pins for this row. `None`: a repository without one.
+    pub(crate) fn queue_version(&mut self, package_id: PackageID, package_json: Option<&[u8]>) {
+        let lockfile = &*self.lockfile;
+        let buf = lockfile.buffers.string_bytes.as_slice();
+        let name = lockfile.packages.items_name()[package_id as usize].slice(buf);
+        let version = match package_json {
+            Some(json) => match crate::lockfile_real::package::version_for_row(json, name) {
+                Some(version) => version,
+                None => return,
+            },
+            None => Box::default(),
+        };
+        let meta = &lockfile.packages.items_meta()[package_id as usize];
+        if meta.recorded_version(buf) != Some(&version[..]) {
+            // Queued, not appended: the installers' tasks still read the lockfile string buffer.
+            self.extracted_versions.push((package_id, version));
+            self.options.enable.set(Enable::FORCE_SAVE_LOCKFILE, true);
+        }
+    }
+
+    fn has_queued_version(&self, package_id: PackageID) -> bool {
+        (self.extracted_versions.iter()).any(|(queued, _)| *queued == package_id)
+    }
+
+    /// `had_integrity`: whether bun.lock pinned the bytes before this extraction.
+    pub(crate) fn queue_extracted_version(
+        &mut self,
+        package_id: PackageID,
+        data: &ExtractData,
+        had_integrity: bool,
+    ) {
         let tag = self.lockfile.packages.items_resolution()[package_id as usize].tag;
-        if !tag.records_package_json_version()
-            || self.lockfile.packages.items_meta()[package_id as usize].has_recorded_version()
-            // The bytes were not checked against what the lockfile pins.
-            || self.skips_verify(tag)
-            || (self.extracted_versions.iter()).any(|(queued, _)| *queued == package_id)
+        if !tag.records_package_json_version() {
+            return;
+        }
+        // From now on bun.lock pins these bytes, so the version has to be theirs.
+        let first_pin = tag.is_tarball() && !had_integrity;
+        let meta = &self.lockfile.packages.items_meta()[package_id as usize];
+        if (meta.has_recorded_version() && !first_pin)
+            // `--no-verify` did not check the bytes against the pin.
+            || (had_integrity && self.skips_verify(tag))
+            // The row stays without a pin, so the next install can get other bytes.
+            || (first_pin && !data.integrity.tag.is_supported())
+            || self.has_queued_version(package_id)
         {
             return;
         }
-        let version: Box<[u8]> = match &data.json {
-            Some(json) => {
-                match crate::lockfile_real::package::version_in_package_json(&json.path, &json.buf)
-                {
-                    Some(version) => version,
-                    None => return,
-                }
-            }
+        match &data.json {
+            Some(json) => self.queue_version(package_id, Some(&json.buf)),
             // A repository with no package.json. The extraction of a tarball fails without one.
-            None if tag.is_git() => Box::default(),
-            None => return,
-        };
-        self.extracted_versions.push((package_id, version));
-        self.options.enable.set(Enable::FORCE_SAVE_LOCKFILE, true);
+            None if tag.is_git() => self.queue_version(package_id, None),
+            None => {}
+        }
+    }
+
+    /// True for a pinned tarball, git or GitHub row with no version, in a run that can save one.
+    pub(crate) fn lacks_recorded_version(&self, package_id: PackageID) -> bool {
+        let tag = self.lockfile.packages.items_resolution()[package_id as usize].tag;
+        if !tag.records_package_json_version() {
+            return false;
+        }
+        let meta = &self.lockfile.packages.items_meta()[package_id as usize];
+        !meta.has_recorded_version()
+            && (tag.is_git() || meta.integrity.tag.is_supported())
+            && self.options.do_.save_lockfile()
+            // `--no-verify` accepts a copy whose bytes nothing checked.
+            && !self.skips_verify(tag)
+            && !self.has_queued_version(package_id)
     }
 
     pub(crate) fn record_extracted_versions(&mut self) -> Result<(), bun_alloc::AllocError> {
-        for (package_id, version) in core::mem::take(&mut self.extracted_versions) {
+        let versions = core::mem::take(&mut self.extracted_versions);
+        if versions.is_empty() {
+            return Ok(());
+        }
+        let before = self.lockfile.buffers.string_bytes.as_ptr();
+        for (package_id, version) in versions {
             let version = self.lockfile.string_buf().append(&version)?;
             self.lockfile.packages.items_meta_mut()[package_id as usize].record_version(version);
+        }
+        // An append can move the buffer that `UpdateRequest::version_buf` views.
+        let after = bun_ptr::RawSlice::new(self.lockfile.buffers.string_bytes.as_slice());
+        for request in &mut self.update_requests {
+            if request.version_buf.as_ptr().cast::<u8>() == before {
+                request.version_buf = after;
+            }
         }
         Ok(())
     }

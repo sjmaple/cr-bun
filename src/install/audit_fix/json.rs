@@ -81,16 +81,22 @@ pub(super) fn write(plan: &FixPlan, outcome: Option<&FixOutcome>, dry_run: bool)
         );
     }
 
-    out.extend_from_slice(b"],\"notFromRegistry\":[");
-    for (i, copy) in plan.not_from_registry.iter().enumerate() {
+    out.extend_from_slice(b"],\"pinned\":[");
+    let found_by_install = outcome.map_or(&[][..], |outcome| &outcome.pinned[..]);
+    for (i, copy) in plan.pinned.iter().chain(found_by_install).enumerate() {
         comma(&mut out, i);
-        name_advisories(
-            &mut out,
-            b"version",
-            &copy.name,
-            &copy.from,
-            &copy.ignore_tokens,
-        );
+        out.extend_from_slice(b"{\"name\":");
+        s(&mut out, &copy.name);
+        out.extend_from_slice(b",\"version\":");
+        s(&mut out, &copy.from);
+        out.extend_from_slice(b",\"resolution\":");
+        s(&mut out, &copy.resolution);
+        out.extend_from_slice(b",\"advisories\":[");
+        for (j, token) in copy.ignore_tokens.iter().enumerate() {
+            comma(&mut out, j);
+            s(&mut out, token);
+        }
+        out.extend_from_slice(b"]}");
     }
 
     out.extend_from_slice(b"],\"manifestUnavailable\":[");
@@ -147,12 +153,6 @@ pub(super) fn write(plan: &FixPlan, outcome: Option<&FixOutcome>, dry_run: bool)
         s(&mut out, &package.name);
         out.extend_from_slice(b",\"resolution\":");
         s(&mut out, &package.resolution);
-        out.extend_from_slice(b",\"dependency\":");
-        if package.dependency.is_empty() {
-            out.extend_from_slice(b"null");
-        } else {
-            s(&mut out, &package.dependency);
-        }
         out.push(b'}');
     }
 

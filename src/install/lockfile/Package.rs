@@ -117,16 +117,24 @@ pub(crate) fn package_json_version<'b>(json: &Expr, bump: &'b bun_alloc::Arena) 
         .unwrap_or_default()
 }
 
-/// `package_json_version` of the text of a package.json. `None` when the text does not parse.
-pub(crate) fn version_in_package_json(path: &[u8], contents: &[u8]) -> Option<Box<[u8]>> {
+/// The version in a package.json. `None` when it does not parse or declares another name than the row.
+pub(crate) fn version_for_row(contents: &[u8], row_name: &[u8]) -> Option<Box<[u8]>> {
     initialize_store();
-    let source = bun_ast::Source::init_path_string(path, contents);
+    let source = bun_ast::Source::init_path_string(b"package.json", contents);
     let mut log = bun_ast::Log::init();
     let parsed = crate::bun_json::ParsedJson::parse_package_json(&source, &mut log).ok()?;
-    Some(Box::from(package_json_version(
-        &parsed.root,
-        &bun_alloc::Arena::new(),
-    )))
+    let bump = bun_alloc::Arena::new();
+    let declared = (parsed.root.as_property(b"name"))
+        .and_then(|name| name.expr.as_utf8(&bump))
+        .unwrap_or_default();
+    // A package with no name that a row can have gets a fallback name, which is not compared.
+    if !declared.is_empty()
+        && dependency::is_safe_lockfile_package_name(declared)
+        && declared != row_name
+    {
+        return None;
+    }
+    Some(Box::from(package_json_version(&parsed.root, &bump)))
 }
 
 /// Returns the path in the form that `Version.value.folder` has in local packages, or `None` if it

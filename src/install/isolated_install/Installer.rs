@@ -274,10 +274,13 @@ impl<'a> Installer<'a> {
             };
 
             let pkg_id = self.store.ids(entry_id).pkg_id;
+            let meta = &self.lockfile().packages.items_meta()[pkg_id as usize];
+            let had_integrity = meta.integrity.tag.is_supported();
             if data.integrity.tag.is_supported() {
                 self.record_extracted_integrity(pkg_id, &data.integrity);
             }
-            self.manager_mut().queue_extracted_version(pkg_id, data);
+            self.manager_mut()
+                .queue_extracted_version(pkg_id, data, had_integrity);
 
             let patched = self
                 .package_patch_info(pkg_id)

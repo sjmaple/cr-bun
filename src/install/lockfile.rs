@@ -397,6 +397,8 @@ impl Scripts {
 pub enum RecordedVersion<'a> {
     /// A registry package: the version in its resolution.
     Registry(&'a Semver::Version),
+    /// A tarball row at the URL that a registry serves its name from: the version in that URL.
+    RegistryTarball(&'a [u8]),
     /// A tarball, git or GitHub package: the `version` of its package.json, as written there.
     PackageJson(&'a [u8]),
     /// A tarball, git or GitHub package whose package.json declares no version.
@@ -842,7 +844,7 @@ impl Lockfile {
     }
 
     /// Returns `None` for git, tarball and unversioned workspace packages, which have no version to
-    /// compare.
+    /// compare. What `recorded_version` has for them is written after the resolver ran.
     pub(crate) fn package_version(&self, id: PackageID) -> Option<Semver::Version> {
         let resolution = &self.packages.items_resolution()[id as usize];
         match resolution.tag {

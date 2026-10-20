@@ -1571,6 +1571,8 @@ impl<'a> PackageInstaller<'a> {
         // tarball) and the lockfile doesn't already have one, persist it so
         // the lockfile gets re-saved with the hash.
         // Before the callbacks below: a `file:` / URL tarball's cache entry is named after it.
+        let meta = &self.lockfile().packages.items_meta()[package_id as usize];
+        let had_integrity = meta.integrity.tag.is_supported();
         if data.integrity.tag.is_supported() {
             let pkg_metas = self.lockfile_mut().packages.items_meta_mut();
             if !pkg_metas[package_id as usize].integrity.tag.is_supported() {
@@ -1581,7 +1583,8 @@ impl<'a> PackageInstaller<'a> {
                     .set(Options::Enable::FORCE_SAVE_LOCKFILE, true);
             }
         }
-        self.manager_mut().queue_extracted_version(package_id, data);
+        self.manager_mut()
+            .queue_extracted_version(package_id, data, had_integrity);
 
         if let Some(removed) = self.manager_mut().task_queue.fetch_remove(&task_id) {
             let callbacks = removed.value;
@@ -1997,6 +2000,13 @@ impl<'a> PackageInstaller<'a> {
         if !needs_install && log_level.show_progress() {
             self.node.complete_one();
         }
+        if !needs_install
+            && installer.patch.is_none()
+            && self.manager().lacks_recorded_version(package_id)
+            && let Some(json) = installer.installed_package_json(&self.root_node_modules_folder)
+        {
+            self.manager_mut().queue_version(package_id, Some(&json));
+        }
 
         // `install_from_link` only re-points one symlink. Everything else replaces the folder.
         if verifying
@@ -2116,6 +2126,18 @@ impl<'a> PackageInstaller<'a> {
                 }
 
                 return;
+            }
+
+            // The cache entry is about to be installed as the package of this row.
+            if installer.patch.is_none() && self.manager().lacks_recorded_version(package_id) {
+                let mut spill = Vec::new();
+                let path = bun_paths::resolve_path::join_z_spill::<platform::Auto>(
+                    &mut spill,
+                    &[installer.cache_dir_subpath.as_bytes(), b"package.json"],
+                );
+                if let Ok(json) = bun_sys::File::read_from(installer.cache_dir, path.as_bytes()) {
+                    self.manager_mut().queue_version(package_id, Some(&json));
+                }
             }
 
             // above checks if unpatched package is in cache, if not null apply patch in temp directory, copy
