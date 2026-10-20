@@ -18676,5 +18676,30 @@
       "generated_131.ts": "export {}\ntype Json = string | Json[];\ntype ValidateJSON<T> = ((...args: Array<any>) => any) extends T ? never : { [K in keyof T]: ValidateJSON<T[K]> };\ntype Check<T> = T extends ValidateJSON<T> ? { a?: 1 } : { a?: 2 };\ntype Box<T> = { v: T };\ntype Opt<T> = T extends string ? { s: T } : { n: T };\ndeclare function take(data: Json): void;\ndeclare function takeN(data: number): void;\ndeclare const j: Json;\ndeclare class C<T = unknown> { constructor(p0: (x: T) => void, p1: Check<T[]>, ...r: T[]); value: T }\nnew C<Json>(1, j).value;\n",
       "tsconfig.json": "{ \"compilerOptions\": { \"strict\": true, \"noEmit\": true, \"target\": \"es2022\", \"module\": \"esnext\", \"moduleResolution\": \"bundler\", \"types\": [], \"lib\": [\"es2022\"], \"jsx\": \"preserve\" } }\n"
     }
+  },
+  "default-of-a-binding-element-reads-a-sibling-named-like-a-type": {
+    "files": {
+      "m.ts": "declare function useState<S>(initial: S): [S, S?];\ninterface width { px: number }\ntype Theme = \"light\" | \"dark\";\ninterface first { x: number }\nconst { width, height = width } = { width: 2 };\nconst [Theme, other = Theme] = [\"light\"];\nconst [first, second = first] = useState(0);\nconst a: string = height;\nconst b: number = other;\nconst c: string = second;\nexport {};\n",
+      "tsconfig.json": "{ \"compilerOptions\": { \"strict\": true, \"noEmit\": true, \"types\": [], \"lib\": [\"es5\"], \"skipLibCheck\": true } }\n"
+    }
+  },
+  "default-of-a-binding-element-reads-a-sibling-named-like-a-type-of-an-earlier-script": {
+    "files": {
+      "a0.d.ts": "interface a { x: number }\n",
+      "b.ts": "interface a { y: number }\nconst [a, b = a + 1] = [2];\nconst wrong: string = b;\n",
+      "tsconfig.json": "{ \"compilerOptions\": { \"strict\": true, \"noEmit\": true, \"types\": [], \"lib\": [\"es5\"], \"skipLibCheck\": true } }\n"
+    }
+  },
+  "default-in-a-nested-pattern-a-function-and-a-namespace-reads-a-sibling-named-like-a-type": {
+    "files": {
+      "m.ts": "interface a { x: number }\nconst { p: [a, b = a] } = { p: [1] };\nconst s: string = b;\nfunction f() {\n  interface c { x: number }\n  var [c, d = c] = [1];\n  let [e, g = e] = [c];\n  const t: string = d;\n  const u: string = g;\n}\nnamespace N {\n  export interface h { x: number }\n  export const [h, i = h] = [2];\n  const v: string = i;\n}\nexport {};\n",
+      "tsconfig.json": "{ \"compilerOptions\": { \"strict\": true, \"noEmit\": true, \"types\": [], \"lib\": [\"es5\"], \"skipLibCheck\": true } }\n"
+    }
+  },
+  "default-of-a-binding-element-reads-a-sibling-named-like-an-exported-interface-or-a-class": {
+    "files": {
+      "m.ts": "export interface a { x: number }\nexport const [a, b = a] = [2];\nconst s: string = b;\ninterface C { x: number }\nconst { C, D = C } = { C: class { y = 1 } };\nconst t: string = D;\n",
+      "tsconfig.json": "{ \"compilerOptions\": { \"strict\": true, \"noEmit\": true, \"types\": [], \"lib\": [\"es5\"], \"skipLibCheck\": true } }\n"
+    }
   }
 }
