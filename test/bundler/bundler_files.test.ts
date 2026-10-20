@@ -691,7 +691,7 @@ describe("bundler files option", () => {
           name: "only a plugin provides it",
           disk: { "main.ts": main },
           plugin(build, dir) {
-            build.onResolve({ filter: /lib[.]ts$/ }, () => ({ path: `${dir}/lib.ts` }));
+            build.onResolve({ filter: /lib[.]ts$/ }, () => ({ path: join(dir, "lib.ts") }));
             returns(text("plugin"))(build, dir);
           },
           errors: [wrong("plugin")],
@@ -744,7 +744,7 @@ describe("bundler files option", () => {
           ...inFiles,
           disk: { "main.ts": `export { value } from "./lib";\n` },
           plugin(build, dir) {
-            build.onResolve({ filter: /^[.][/]lib$/ }, () => ({ path: `${dir}/lib.ts` }));
+            build.onResolve({ filter: /^[.][/]lib$/ }, () => ({ path: join(dir, "lib.ts") }));
             returns(text("plugin"))(build, dir);
           },
         },
@@ -946,6 +946,34 @@ describe("bundler files option", () => {
         files: { "src/../lib.ts": text("files") },
       });
       expect(errors).toEqual([wrong("disk")]);
+    });
+
+    // A relative key is what a specifier is, not where a file is. This needs the project as the working directory.
+    test("a relative key that the bundle does not load is not a file of the project", async () => {
+      using project = tempDir("bundler-files-check", {
+        "tsconfig.json": JSON.stringify({ compilerOptions: options }),
+        "globals.d.ts": globals,
+        "main.ts": `import type { value } from "./lib.ts";\nexport type Value = typeof value;\n`,
+        "lib.ts": text("disk"),
+        "build.mjs": `
+          const files = { "./lib.ts": ${JSON.stringify(text("files"))} };
+          const built = await Bun.build({ entrypoints: ["./main.ts"], check: true, throw: false, files });
+          console.log(JSON.stringify(built.logs.map(log => log.message)));
+        `,
+      });
+      await using proc = Bun.spawn({
+        cmd: [bunExe(), "build.mjs"],
+        cwd: String(project),
+        env: bunEnv,
+        stdout: "pipe",
+        stderr: "pipe",
+      });
+      const [stdout, stderr, exitCode] = await Promise.all([proc.stdout.text(), proc.stderr.text(), proc.exited]);
+      expect({ stdout: stdout.trim(), stderr, exitCode }).toEqual({
+        stdout: JSON.stringify([`TS2322: Type '1' is not assignable to type '"disk"'.`]),
+        stderr: "",
+        exitCode: 0,
+      });
     });
 
     // The resolver of the bundler reads `tsconfig.json` from disk.
