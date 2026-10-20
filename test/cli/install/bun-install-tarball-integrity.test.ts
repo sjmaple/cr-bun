@@ -1113,6 +1113,32 @@ describe.concurrent.each(
       await box.ok("app", "install", "--no-verify");
       expect(await box.state("app")).toEqual(stateOf("v1", v1));
       expect(box.requests).toEqual(["/pkg.tgz"]);
+      // The version is of the bytes that the hash is of.
+      expect((Bun.JSONC.parse(await box.lockfile("app")) as any).packages.pkg).toEqual([
+        `pkg@${box.resolution}`,
+        { version: "1.0.0" },
+        v1.integrity,
+      ]);
+    });
+
+    it("does not record the version of bytes that it did not check", async () => {
+      const real = await tarball("real");
+      const forged = await tarball("forged", { version: "6.6.6" });
+      using box = noVerifySandbox("no-verify-version", { app: {} });
+      await box.put("app", real);
+      await box.ok("app", "install");
+      // As an older bun wrote the row: with the hash, without the version.
+      const legacy = (await box.lockfile("app")).replace('{ "version": "1.0.0" }', "{}");
+      expect(legacy).toContain(`{}, "${real.integrity}"`);
+      await writeFile(join(box.root, "app", "bun.lock"), legacy);
+      await rm(join(box.root, "cache"), { recursive: true });
+
+      // From a download, then from the copy in node_modules.
+      await box.put("app", forged);
+      await box.reinstall("app", "--no-verify");
+      await box.ok("app", "install", "--no-verify");
+      expect(await box.installed("app")).toBe('module.exports = "forged";\n');
+      expect(await box.lockfile("app")).toBe(legacy);
     });
 
     it("bun update --no-verify installs the new bytes of the URL and records their hash", async () => {

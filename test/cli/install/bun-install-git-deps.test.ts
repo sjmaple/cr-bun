@@ -2810,12 +2810,18 @@ test.concurrent.each([
   expectInstalled(frozen.stdout, { lib: resolution });
   expect(frozen.exitCode).toBe(0);
 
-  // Nothing changed, so nothing is saved.
+  // The row has no version, as an older bun wrote it. The install records the version and keeps the resolution.
   const again = await runInstall(project, join(root, "cache"), repo.env);
-  expect(again.stderr).not.toContain("Saved lockfile");
-  expect(again.stdout).toContain("(no changes)");
-  expect(readFileSync(join(project, "bun.lock"), "utf8")).toBe(lockfile);
+  expect(await lockedPackages(project)).toEqual({ lib: [`lib@${resolution}`, { version: "1.0.0" }, repo.sha] });
   expect(again.exitCode).toBe(0);
+
+  // Nothing changed, so nothing is saved.
+  const saved = readFileSync(join(project, "bun.lock"), "utf8");
+  const third = await runInstall(project, join(root, "cache"), repo.env);
+  expect(third.stderr).not.toContain("Saved lockfile");
+  expect(third.stdout).toContain("(no changes)");
+  expect(readFileSync(join(project, "bun.lock"), "utf8")).toBe(saved);
+  expect(third.exitCode).toBe(0);
 });
 
 // The name of the store entry comes from the repository as the lockfile has it. That text used to differ between the

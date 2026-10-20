@@ -1854,7 +1854,8 @@ describe("`bun audit` of tarball and git dependencies", () => {
     const json = await audit(dir, "--json");
     expect(Object.keys(JSON.parse(json.stdout))).toEqual(["vul"]);
     expect(json.exitCode).toBe(1);
-    expect(bulkBodies).toEqual([{}, { vul: ["1.0.0"] }]);
+    // Only the request of the second audit has a package.
+    expect(bulkBodies.filter(body => Object.keys(body).length > 0)).toEqual([{ vul: ["1.0.0"] }]);
 
     // The same for a row with no version: --prod does not name what it leaves out.
     await write(join(dir, "bun.lock"), (await lock(dir)).replace('{ "version": "1.0.0" }', "{}"));

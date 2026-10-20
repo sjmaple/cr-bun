@@ -99,10 +99,15 @@ fn print_no_vulnerabilities(stats: &AuditStats, audit_level: Option<AuditLevel>)
 }
 
 fn print_registry_only(
+    pm: &PackageManager,
     advisories: &[VulnerabilityInfo],
     collected: &CollectPackagesResult,
-    lockfile: &Lockfile,
 ) {
+    if advisories.is_empty() || pm.options.log_level == LogLevel::Silent {
+        return;
+    }
+    let lockfile: &Lockfile = &pm.lockfile;
+    Output::flush();
     for advisory in advisories {
         let name = &advisory.package_name;
         let mut copies: Vec<u8> = Vec::new();
@@ -254,7 +259,7 @@ impl AuditCommand {
                 Some(&collected),
                 &mut stats,
             )?;
-            print_registry_only(&stats.registry_only, &collected, &pm.lockfile);
+            print_registry_only(pm, &stats.registry_only, &collected);
             if !matches!(vulnerabilities, Err(SkipReason::NotJson)) {
                 let _ = Output::writer().write_all(&response_text);
                 let _ = Output::writer().write_all(b"\n");
@@ -681,10 +686,8 @@ fn send_audit_requests(
     }
 
     stats.not_audited = collected.unrecorded.len();
-    if warn {
-        if pm.options.log_level != LogLevel::Silent {
-            audit_fix::print_unaudited(&unaudited_registries);
-        }
+    if warn && pm.options.log_level != LogLevel::Silent {
+        audit_fix::print_unaudited(&unaudited_registries);
         audit_fix::print_unrecorded(&collected.unrecorded);
     }
 
@@ -720,7 +723,7 @@ fn audit_for_fix(
     };
 
     if warn {
-        print_registry_only(&stats.registry_only, &collected, &pm.lockfile);
+        print_registry_only(pm, &stats.registry_only, &collected);
     }
 
     Ok(FixAudit {
@@ -1150,7 +1153,7 @@ fn print_enhanced_audit_report(
             return Ok(1);
         }
     };
-    print_registry_only(&stats.registry_only, collected, &pm.lockfile);
+    print_registry_only(pm, &stats.registry_only, collected);
 
     if vulnerabilities.is_empty() {
         print_no_vulnerabilities(&stats, audit_level);
