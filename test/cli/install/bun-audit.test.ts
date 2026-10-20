@@ -1692,20 +1692,16 @@ describe("`bun audit` of tarball and git dependencies", () => {
     "GitHub": { spec: () => "github:owner/vul#abc1234", from: literally },
   };
 
+  const sourceFiles = async () => ({
+    "/t/vul.tgz": await tarball(vul),
+    "/repos/owner/vul/tarball/abc1234": await githubTarball("owner-vul-abc1234", {
+      "package.json": JSON.stringify(vul),
+    }),
+  });
+
   test.concurrent.each(Object.keys(sources))("sends a package that came from %s", async source => {
     const bulkBodies: Record<string, string[]>[] = [];
-    await using server = startRegistry(
-      { vul: [adv("<2.0.0")] },
-      {
-        bulkBodies,
-        files: {
-          "/t/vul.tgz": await tarball(vul),
-          "/repos/owner/vul/tarball/abc1234": await githubTarball("owner-vul-abc1234", {
-            "package.json": JSON.stringify(vul),
-          }),
-        },
-      },
-    );
+    await using server = startRegistry({ vul: [adv("<2.0.0")] }, { bulkBodies, files: await sourceFiles() });
     let spec = "";
     using dir = await project(server, async dir => {
       spec = await sources[source].spec(server, dir);
@@ -1785,6 +1781,28 @@ describe("`bun audit` of tarball and git dependencies", () => {
     );
     expect(normalizeBunSnapshot(report.stdout)).toBe(AUDIT_HEADER + noVulnerabilities(2));
     expect(report.exitCode).toBe(0);
+  });
+
+  test.concurrent("audit fix matches no range to a version that is not semver", async () => {
+    await using server = startRegistry(
+      {},
+      {
+        bulkResponse: { odd: [adv("*")] },
+        files: { "/t/odd.tgz": await tarball({ name: "odd", version: "banana" }) },
+      },
+    );
+    using dir = await project(server, () => ({ dependencies: { odd: `${registryHref(server)}/t/odd.tgz` } }));
+    await runBunInstall(installEnv(dir), dir);
+
+    // The registry sent the advisory, so it counts. No copy is in its range, so none is listed as pinned.
+    const fix = await auditFix(dir, "--dry-run", "--json");
+    expect(JSON.parse(fix.stdout)).toMatchObject({
+      pinned: [],
+      unmatched: [{ name: "odd", range: "*" }],
+      fixed: 0,
+      remaining: 1,
+    });
+    expect(fix.exitCode).toBe(1);
   });
 
   test.concurrent("the report names the tarball copy next to a registry copy of the same name", async () => {
@@ -2123,6 +2141,13 @@ describe("`bun audit` of tarball and git dependencies", () => {
     expect(json.exitCode).toBe(0);
     // No request had the package.
     expect(bulkBodies.flatMap(body => Object.keys(body))).toEqual([]);
+
+    // --silent prints no warning.
+    for (const args of [["--silent"], ["--json", "--silent"], ["fix", "--silent"]]) {
+      const silent = await audit(dir, ...args);
+      expect(silent.stderr).toBe("");
+      expect(silent.exitCode).toBe(0);
+    }
   });
 
   test.concurrent("names every package with no version, a nested one too", async () => {
@@ -2208,70 +2233,74 @@ describe("`bun audit` of tarball and git dependencies", () => {
     expect(await lock(dir)).toContain(`"vul": ["vul@${url}", { "version": "1.0.0" }, "sha512-`);
   });
 
+  test.concurrent.each(Object.keys(sources))("bun install gives a row from %s the version it lacks", async source => {
+    await using server = startRegistry({}, { files: await sourceFiles() });
+    using dir = await project(server, async dir => ({
+      dependencies: { vul: await sources[source].spec(server, dir) },
+    }));
+    const env = { GITHUB_API_URL: registryHref(server) };
+    expect((await run(dir, ["install"], dir, env)).exitCode).toBe(0);
+    const recorded = await lock(dir);
+    const legacy = recorded.replace('{ "version": "1.0.0" }', "{}");
+    expect(legacy).not.toBe(recorded);
+
+    // From the copy in node_modules, from the cache, and from a new download.
+    for (const removed of [[], ["node_modules"], ["node_modules", ".bun-cache"]]) {
+      await write(join(dir, "bun.lock"), legacy);
+      for (const folder of removed) await rm(join(dir, folder), { recursive: true, force: true });
+      const install = await run(dir, ["install"], dir, env);
+      expect(install.stderr).toContain("Saved lockfile");
+      expect(install.exitCode).toBe(0);
+      expect(await lock(dir)).toBe(recorded);
+    }
+  });
+
   describe.each(["hoisted", "isolated"])("with the %s linker", linker => {
-    // Longer than the 8 bytes that fit in the row itself, so the install adds it to the lockfile's strings.
-    const beta = { name: "vul", version: "1.0.0-beta.123456" };
+    // Too long for the spare room of the lockfile's strings, so the install moves them to add it.
+    const long = { name: "vul", version: "1.0.0-" + Buffer.alloc(200, "a").toString() };
 
-    test.concurrent("an install that extracts the tarball records its version", async () => {
+    test.concurrent("bun install records the version from node_modules, the cache, and a download", async () => {
       const bulkBodies: Record<string, string[]>[] = [];
-      await using server = startRegistry(
-        { vul: [adv("<2.0.0")] },
-        { bulkBodies, files: { "/t/vul.tgz": await tarball(vul) } },
-      );
-      const { dir, url, recorded } = await legacyProject(server, { linker });
-      using _ = dir;
-      await wipe(dir);
-
-      const install = await run(dir, ["install"]);
-      expect(install.stderr).toContain("Saved lockfile");
-      expect(install.exitCode).toBe(0);
-      expect(await lock(dir)).toBe(recorded);
-
-      const report = await audit(dir);
-      expect(report.stdout).toContain(vulAdvisory(url));
-      expect(report.exitCode).toBe(1);
-      expect(bulkBodies).toEqual([{ vul: ["1.0.0"] }]);
-    });
-
-    test.concurrent("an install that finds the package in node_modules records its version", async () => {
-      await using server = startRegistry({}, { files: { "/t/vul.tgz": await tarball(beta) } });
-      const { dir, recorded } = await legacyProject(server, { linker }, beta);
+      await using server = startRegistry({}, { bulkBodies, files: { "/t/vul.tgz": await tarball(long) } });
+      const { dir, recorded, legacy } = await legacyProject(server, { linker }, long);
       using _ = dir;
 
-      const install = await run(dir, ["install"]);
-      expect(install.stderr).toContain("Saved lockfile");
-      expect(install.exitCode).toBe(0);
-      expect(await lock(dir)).toBe(recorded);
+      for (const removed of [[], ["node_modules"], ["node_modules", ".bun-cache"]]) {
+        await write(join(dir, "bun.lock"), legacy);
+        for (const folder of removed) await rm(join(dir, folder), { recursive: true, force: true });
+        const install = await run(dir, ["install"]);
+        expect(install.stderr).toContain("Saved lockfile");
+        expect(install.exitCode).toBe(0);
+        expect(await lock(dir)).toBe(recorded);
+      }
 
       // The record is there, so the next install has nothing to save.
       const again = await run(dir, ["install"]);
       expect(again.stderr).not.toContain("Saved lockfile");
       expect(again.exitCode).toBe(0);
       expect(await lock(dir)).toBe(recorded);
+
+      expect((await audit(dir)).stderr).toBe("");
+      expect(bulkBodies).toEqual([{ vul: [long.version] }]);
     });
 
-    test.concurrent("an install that takes the package from the cache records its version", async () => {
-      await using server = startRegistry({}, { files: { "/t/vul.tgz": await tarball(beta) } });
-      const { dir, recorded } = await legacyProject(server, { linker }, beta);
-      using _ = dir;
-      await rm(join(dir, "node_modules"), { recursive: true, force: true });
+    test.concurrent.each([
+      ["add", "no-deps@1.0.0"],
+      ["update", "vul"],
+      ["remove", "a-dep"],
+    ])("bun %s %s records the version of the tarball", async (...command) => {
+      await using server = startRegistry({}, { files: { "/t/vul.tgz": await tarball(long) } });
+      const url = `${registryHref(server)}/t/vul.tgz`;
+      using dir = await project(server, () => ({ dependencies: { vul: url, "a-dep": "1.0.2" } }), { linker });
+      await runBunInstall(installEnv(dir), dir);
+      const row = (await lock(dir)).match(/"vul": \[.*\],\n/)![0];
+      expect(row).toContain(`{ "version": "${long.version}" }`);
+      await write(join(dir, "bun.lock"), (await lock(dir)).replace(`{ "version": "${long.version}" }`, "{}"));
 
-      const install = await run(dir, ["install"]);
-      expect(install.stderr).toContain("Saved lockfile");
-      expect(install.exitCode).toBe(0);
-      expect(await lock(dir)).toBe(recorded);
-    });
-
-    test.concurrent("bun add of another package records the version of the tarball", async () => {
-      await using server = startRegistry({}, { files: { "/t/vul.tgz": await tarball(beta) } });
-      const { dir, recorded } = await legacyProject(server, { linker }, beta);
-      using _ = dir;
-
-      const add = await run(dir, ["add", "no-deps@1.0.0"]);
-      expect(add.stderr).toContain("Saved lockfile");
-      expect(add.exitCode).toBe(0);
-      expect(await lock(dir)).toContain(recorded.match(/"vul": \[.*\],\n/)![0]);
-      expect(await installedVersion(dir, "no-deps")).toBe("1.0.0");
+      const result = await run(dir, command);
+      expect(result.stderr).toContain("Saved lockfile");
+      expect(result.exitCode).toBe(0);
+      expect(await lock(dir)).toContain(row);
     });
 
     test.concurrent("a frozen install leaves the lockfile as it is", async () => {
