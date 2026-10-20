@@ -136,7 +136,7 @@ impl DeferredRequest {
         );
         let handler = ::core::mem::replace(&mut self.handler, Handler::Aborted);
         match handler {
-            Handler::ServerHandler(saved) => {
+            Handler::ServerHandler(mut saved) => {
                 debug_log_dr!(
                     "  request url: {}",
                     // SAFETY: saved.request is a live *mut webcore::Request (held strong by ctx)
@@ -145,8 +145,8 @@ impl DeferredRequest {
                 saved
                     .ctx
                     .set_signal_aborted(jsc::CommonAbortReason::ConnectionClosed);
-                // Note: saved.js_request (jsc::Strong) drops at end of arm
-                drop(saved);
+                // Also releases the deferral's ref on the request context, which dropping `saved` does not.
+                saved.deinit();
             }
             Handler::BundledHtmlPage(r) => {
                 // Reached from JS event-loop tasks (on_plugins_rejected, the
