@@ -856,7 +856,7 @@ describe("a macro import that is used outside of a call", () => {
       errors.map(error => [
         error.message,
         ...at(error.position),
-        ...error.notes.map((note: any) => [note.message, ...at(note.position)]),
+        ...(error.notes ?? []).map((note: any) => [note.message, ...at(note.position)]),
       ]);
   `;
   const inDirectory = (directory: string, sources: [file: string, source: string][]) =>
