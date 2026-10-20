@@ -166,6 +166,9 @@ static int us_ssl_bio_type = 0;
  * entry — see us_ssl_ctx_set_sni_policy. Absent on node:tls SecureContexts,
  * whose policy is server-level. */
 static int us_ctx_sni_policy_ex_idx = -1;
+/* (SSL_CTX) us_ssl_ctx_identities_t: the identities of a context built from several key and certificate pairs.
+ * BoringSSL has no getter for what SSL_CTX_add1_credential stored, and us_ssl_use_ctx_identity copies them to an SSL. */
+static int us_ctx_identities_ex_idx = -1;
 /* Defined in Rust (src/uws_sys/SocketKind.rs) so the ordinal tracks the enum. */
 extern const unsigned char BUN_SOCKET_KIND_BUN_SOCKET_TLS;
 extern const unsigned char BUN_SOCKET_KIND_UWS_HTTP_TLS;
@@ -222,6 +225,21 @@ static void us_ctx_ex_free(void *parent, void *ptr, CRYPTO_EX_DATA *ad,
                            int index, long argl, void *argp) {
   (void)parent; (void)ptr; (void)ad; (void)index; (void)argl; (void)argp;
   atomic_fetch_sub(&ssl_ctx_live, 1);
+}
+
+/* In OpenSSL's order of preference: BoringSSL serves the first usable credential. */
+enum { US_SSL_IDENTITY_ECDSA, US_SSL_IDENTITY_EDDSA, US_SSL_IDENTITY_RSA, US_SSL_IDENTITY_TYPES };
+struct us_ssl_ctx_identities_t {
+  SSL_CREDENTIAL *identity[US_SSL_IDENTITY_TYPES];
+};
+
+static void us_ctx_identities_free(void *parent, void *ptr, CRYPTO_EX_DATA *ad,
+                                   int index, long argl, void *argp) {
+  (void)parent; (void)ad; (void)index; (void)argl; (void)argp;
+  struct us_ssl_ctx_identities_t *identities = ptr;
+  if (!identities) return;
+  for (int type = 0; type < US_SSL_IDENTITY_TYPES; type++) SSL_CREDENTIAL_free(identities->identity[type]);
+  us_free(identities);
 }
 static struct us_server_names_t *us_server_names_ref(struct us_listen_socket_t *ls);
 static void us_server_names_unref(struct us_server_names_t *names);
@@ -377,6 +395,7 @@ static void us_ex_idx_init(void) {
   us_ctx_cache_ex_idx = SSL_CTX_get_ex_new_index(0, NULL, NULL, NULL, bun_ssl_ctx_cache_on_free);
   us_ctx_user_ca_ex_idx = SSL_CTX_get_ex_new_index(0, NULL, NULL, NULL, NULL);
   us_ctx_sni_policy_ex_idx = SSL_CTX_get_ex_new_index(0, NULL, NULL, NULL, NULL);
+  us_ctx_identities_ex_idx = SSL_CTX_get_ex_new_index(0, NULL, NULL, NULL, us_ctx_identities_free);
   us_ssl_rare_ex_idx = SSL_get_ex_new_index(0, NULL, NULL, NULL, us_ssl_rare_free);
   us_ssl_wrapper_ex_idx = SSL_get_ex_new_index(0, NULL, NULL, NULL, NULL);
   us_ssl_bio_type = BIO_get_new_index() | BIO_TYPE_SOURCE_SINK;
@@ -1058,20 +1077,26 @@ end:
   return ret;
 }
 
-/* BoringSSL's ssl_auto_chain_if_needed, which at handshake time completes the legacy slot but no credential. */
-static int us_ssl_ctx_auto_chain(SSL_CTX *ctx) {
-  if (sk_CRYPTO_BUFFER_num(SSL_CTX_get0_chain(ctx)) != 1) return 1;
+/* The certificates above the context's own, as far as its store has them. The caller frees the result. */
+static STACK_OF(X509) *us_ssl_ctx_issuers(SSL_CTX *ctx) {
   X509_STORE_CTX *walk = X509_STORE_CTX_new();
   if (walk == NULL || !X509_STORE_CTX_init(walk, SSL_CTX_get_cert_store(ctx), SSL_CTX_get0_certificate(ctx), NULL)) {
     X509_STORE_CTX_free(walk);
-    return 0;
+    return NULL;
   }
   X509_verify_cert(walk);
   ERR_clear_error();
   STACK_OF(X509) *chain = X509_STORE_CTX_get1_chain(walk);
   X509_STORE_CTX_free(walk);
+  if (chain != NULL) X509_free(sk_X509_shift(chain));
+  return chain;
+}
+
+/* BoringSSL's ssl_auto_chain_if_needed, which at handshake time completes the legacy slot but no credential. */
+static int us_ssl_ctx_auto_chain(SSL_CTX *ctx) {
+  if (sk_CRYPTO_BUFFER_num(SSL_CTX_get0_chain(ctx)) != 1) return 1;
+  STACK_OF(X509) *chain = us_ssl_ctx_issuers(ctx);
   if (chain == NULL) return 0;
-  X509_free(sk_X509_shift(chain));
   int ok = SSL_CTX_set1_chain(ctx, chain);
   sk_X509_pop_free(chain, X509_free);
   return ok;
@@ -1096,8 +1121,8 @@ static SSL_CREDENTIAL *us_ssl_ctx_copy_legacy_identity(SSL_CTX *ctx) {
 /* One identity per key type, as in OpenSSL: the last certificate of a type wins, with whichever key fits it. */
 static int us_ssl_ctx_use_identities(SSL_CTX *ctx, const char *const *cert, unsigned int cert_count,
                                      const char *const *key, unsigned int key_count) {
-  /* In OpenSSL's order of preference: BoringSSL serves the first usable credential. */
-  enum { TYPE_ECDSA, TYPE_EDDSA, TYPE_RSA, KEY_TYPES };
+  enum { TYPE_ECDSA = US_SSL_IDENTITY_ECDSA, TYPE_EDDSA = US_SSL_IDENTITY_EDDSA, TYPE_RSA = US_SSL_IDENTITY_RSA,
+         KEY_TYPES = US_SSL_IDENTITY_TYPES };
   const char *leaf[KEY_TYPES] = {NULL};
   SSL_CREDENTIAL *identity[KEY_TYPES] = {NULL};
   int ok = 1;
@@ -1129,9 +1154,20 @@ static int us_ssl_ctx_use_identities(SSL_CTX *ctx, const char *const *cert, unsi
       ok = 0;
     }
   }
+  struct us_ssl_ctx_identities_t *identities = ok ? us_calloc(1, sizeof(*identities)) : NULL;
+  ok = ok && identities != NULL;
   for (int type = 0; type < KEY_TYPES; type++) {
     if (ok && identity[type] != NULL) ok = SSL_CTX_add1_credential(ctx, identity[type]);
-    SSL_CREDENTIAL_free(identity[type]);
+    if (identities != NULL) {
+      identities->identity[type] = identity[type];
+    } else {
+      SSL_CREDENTIAL_free(identity[type]);
+    }
+  }
+  us_ex_idx_ensure();
+  if (identities != NULL && (!ok || !SSL_CTX_set_ex_data(ctx, us_ctx_identities_ex_idx, identities))) {
+    us_ctx_identities_free(NULL, identities, NULL, 0, 0, NULL);
+    ok = 0;
   }
   return ok;
 }
@@ -3200,6 +3236,9 @@ void us_ssl_ctx_set_sni_policy(SSL_CTX *ctx, int request_cert, int reject_unauth
  * (RFC 6066 section 3; openssl/ssl.h: "partition session caches between SNI
  * hosts") and must not be relaxed for parity with another runtime. */
 static void us_ssl_apply_selected_ctx(SSL *ssl, SSL_CTX *ctx) {
+  /* The switch replaces the identity and the trust store that us_ssl_use_ctx_identity put on the connection. The
+   * client-CA names are kept apart from those, and would hide this context's. */
+  SSL_set0_client_CAs(ssl, NULL);
   SSL_set_SSL_CTX(ssl, ctx);
   if (us_ctx_sni_policy_ex_idx < 0) return;
   uintptr_t policy = (uintptr_t)SSL_CTX_get_ex_data(ctx, us_ctx_sni_policy_ex_idx);
@@ -3207,6 +3246,82 @@ static void us_ssl_apply_selected_ctx(SSL *ssl, SSL_CTX *ctx) {
   int mode = SSL_get_verify_mode(ssl) | SSL_VERIFY_PEER;
   if (policy & US_SNI_POLICY_REJECT_UNAUTHORIZED) mode |= SSL_VERIFY_FAIL_IF_NO_PEER_CERT;
   SSL_set_verify(ssl, mode, us_verify_callback);
+}
+
+/* After the handshake picked its credential (a call from an ALPNCallback), BoringSSL signs with that object and with the
+ * signature algorithm it chose for it. When the object is the connection's own, a new identity changes it in place, so
+ * the new key has to fit that choice: the same type, the same curve, an RSA key that is not shorter. */
+static int us_ssl_key_fits_handshake(SSL *ssl, EVP_PKEY *key) {
+  if (SSL_get0_selected_credential(ssl) == NULL) return 1;
+  EVP_PKEY *picked = SSL_get_privatekey(ssl);
+  if (picked == NULL || EVP_PKEY_id(picked) != EVP_PKEY_id(key)) return 0;
+  if (EVP_PKEY_id(key) == EVP_PKEY_EC) return EVP_PKEY_get_ec_curve_nid(picked) == EVP_PKEY_get_ec_curve_nid(key);
+  if (EVP_PKEY_id(key) == EVP_PKEY_RSA) return EVP_PKEY_bits(key) >= EVP_PKEY_bits(picked);
+  return 1;
+}
+
+/* Replaces the certificates and the keys of `ssl` with those of `ctx`. */
+static int us_ssl_use_ctx_certificates(SSL *ssl, SSL_CTX *ctx) {
+  const STACK_OF(CRYPTO_BUFFER) *chain = SSL_CTX_get0_chain(ctx);
+  size_t count = sk_CRYPTO_BUFFER_num(chain);
+  CRYPTO_BUFFER **certs = us_calloc(count, sizeof(*certs));
+  /* At handshake time BoringSSL completes a lone certificate from the store of the connection's context. The
+   * intermediates of this one (a pfx, `ca`) are in the store of its own. */
+  STACK_OF(X509) *issuers = count == 1 ? us_ssl_ctx_issuers(ctx) : NULL;
+  int ok = certs != NULL && (count != 1 || issuers != NULL);
+  if (ok) {
+    for (size_t i = 0; i < count; i++) certs[i] = sk_CRYPTO_BUFFER_value(chain, i);
+    /* The credentials that the connection copied from its own context would be tried before this one. */
+    SSL_certs_clear(ssl);
+    ok = SSL_set_chain_and_key(ssl, certs, count, SSL_CTX_get0_privatekey(ctx), NULL) &&
+         (sk_X509_num(issuers) == 0 || SSL_set1_chain(ssl, issuers));
+  }
+  us_free(certs);
+  sk_X509_pop_free(issuers, X509_free);
+  us_ex_idx_ensure();
+  struct us_ssl_ctx_identities_t *identities = SSL_CTX_get_ex_data(ctx, us_ctx_identities_ex_idx);
+  for (int type = 0; ok && identities != NULL && type < US_SSL_IDENTITY_TYPES; type++) {
+    if (identities->identity[type] != NULL) ok = SSL_add1_credential(ssl, identities->identity[type]);
+  }
+  return ok;
+}
+
+/* The names that a server sends with its request for a client certificate: those of `ctx`, also when it has none. */
+static int us_ssl_use_ctx_client_ca_names(SSL *ssl, SSL_CTX *ctx) {
+  STACK_OF(X509_NAME) *names = SSL_CTX_get_client_CA_list(ctx);
+  STACK_OF(CRYPTO_BUFFER) *buffers = sk_CRYPTO_BUFFER_new_null();
+  int ok = buffers != NULL;
+  for (size_t i = 0; ok && i < sk_X509_NAME_num(names); i++) {
+    uint8_t *der = NULL;
+    int len = i2d_X509_NAME(sk_X509_NAME_value(names, i), &der);
+    CRYPTO_BUFFER *name = len < 0 ? NULL : CRYPTO_BUFFER_new(der, (size_t)len, NULL);
+    OPENSSL_free(der);
+    ok = name != NULL && sk_CRYPTO_BUFFER_push(buffers, name);
+    if (!ok) CRYPTO_BUFFER_free(name);
+  }
+  if (!ok) {
+    sk_CRYPTO_BUFFER_pop_free(buffers, CRYPTO_BUFFER_free);
+    return 0;
+  }
+  /* An empty list and not NULL, which stands for the names of the connection's SSL_CTX. */
+  SSL_set0_client_CAs(ssl, buffers);
+  return 1;
+}
+
+/* tlsSocket.setKeyCert(): puts the identity and the trust of `ctx` on a live connection, as Node's TLSWrap::SetKeyCert
+ * does. The connection stays on the SSL_CTX it was created on or that SNI selected. BoringSSL reads the early callback
+ * and the ALPN callback from that context (us_select_cert_cb, select_alpn_callback), so an SNICallback that has not
+ * answered keeps the handshake parked and ALPN is still negotiated. `sid` is the session id context of `ctx`, which a
+ * server takes with the identity (see us_ssl_apply_selected_ctx). Returns 0, with the connection unchanged, when `ctx`
+ * has no certificate or no key. */
+int us_ssl_use_ctx_identity(SSL *ssl, SSL_CTX *ctx, const uint8_t *sid, size_t sid_len) {
+  EVP_PKEY *key = SSL_CTX_get0_privatekey(ctx);
+  if (sk_CRYPTO_BUFFER_value(SSL_CTX_get0_chain(ctx), 0) == NULL || key == NULL) return 0;
+  if (us_ssl_key_fits_handshake(ssl, key) && !us_ssl_use_ctx_certificates(ssl, ctx)) return 0;
+  /* Node's SetCACerts: the store that the peer's certificate is verified against, and the names above. */
+  if (!SSL_set1_verify_cert_store(ssl, SSL_CTX_get_cert_store(ctx))) return 0;
+  if (!SSL_is_server(ssl)) return 1;
+  return us_ssl_use_ctx_client_ca_names(ssl, ctx) && SSL_set_session_id_context(ssl, sid, sid_len);
 }
 
 /* Whether the SNI-selected context of this connection demands closing on a
