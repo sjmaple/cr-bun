@@ -1,5 +1,4 @@
-//! Where the statements that the visit pass left still name a macro import. `P::reject_macro_value_uses` decides from
-//! the use counts that one is left, and only then asks this for the place to report.
+//! Finds the identifiers that still name a macro import, for the location of `P::reject_macro_value_uses`'s error.
 
 use bun_ast::expr::Data;
 use bun_ast::stmt::Data as StmtData;
@@ -18,8 +17,7 @@ struct Locator<'r, 'a> {
     stack_check: bun_core::StackCheck,
 }
 
-/// Each identifier that names a key of `refs`, in the order of the statements. What is nested deeper than `MAX_DEPTH`
-/// is not in it.
+/// Each identifier that names a key of `refs`, in statement order. One nested deeper than `MAX_DEPTH` is not in it.
 #[cold]
 #[inline(never)]
 pub(crate) fn locate_macro_refs(parts: [&[ast::Part]; 3], refs: &MacroRefs<'_>) -> Vec<(Ref, Loc)> {
@@ -248,8 +246,7 @@ impl Locator<'_, '_> {
     }
 
     fn expr_at_depth(&mut self, expr: &Expr) {
-        // A long `a + b + c + ...` is as deep to the left as it is long, and `a.b().c()...` at its target. The links
-        // of such a chain wait here, not on the stack, for what is left of them.
+        // `a + b + c + ...` and `a.b().c()...` are as deep as they are long: their links wait here, not on the stack.
         let mut chain: Vec<&Expr> = Vec::new();
         let mut expr = expr;
         loop {

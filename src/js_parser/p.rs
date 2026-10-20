@@ -4508,8 +4508,7 @@ impl<'a, const TYPESCRIPT: bool, const SCAN_ONLY: bool> P<'a, TYPESCRIPT, SCAN_O
         Ok(self.s(stmt, loc))
     }
 
-    /// A macro import is removed, and only a call of it is replaced: the call un-counts its target. A use that the
-    /// visit pass still counts is a name that the output would not declare.
+    /// A replaced macro call un-counts its target, so a use that is still counted names a binding that is not declared.
     #[cold]
     #[inline(never)]
     pub(crate) fn reject_macro_value_uses(&mut self, parts: [&[js_ast::Part]; 3]) {
@@ -4618,8 +4617,7 @@ impl<'a, const TYPESCRIPT: bool, const SCAN_ONLY: bool> P<'a, TYPESCRIPT, SCAN_O
         }
     }
 
-    /// The parse pass counts the name of a decorator-metadata type as a use. `reject_macro_value_uses` reads what the
-    /// visit pass counts.
+    /// The parse pass counts a decorator-metadata type name as a use. Only uses that the visit pass counts are errors.
     #[cold]
     pub(crate) fn reset_macro_use_counts(&mut self) {
         for i in 0..self.macro_.refs.count() {

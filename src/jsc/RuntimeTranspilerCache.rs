@@ -67,8 +67,7 @@ bun_core::declare_scope!(cache, visible);
 /// Version 35: Long hexadecimal, octal and binary literals are rounded to the nearest double.
 /// Version 36: `export`, `require()`, `import()`, a JSX element, an exported async function and
 /// an abstract class are mapped elsewhere.
-/// Version 37: A macro import that is used outside of a call is an error. Older entries still
-/// name the removed binding.
+/// Version 37: A macro import that is used outside of a call is an error, and older entries still name it.
 const EXPECTED_VERSION: u32 = 37;
 
 /// Source files smaller than this are not written to / read from the on-disk
