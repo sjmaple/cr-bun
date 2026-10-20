@@ -1914,6 +1914,8 @@ describe("`bun audit` of tarball and git dependencies", () => {
     const files = {
       "/no-deps/-/no-deps-1.0.0.tgz": await tarball({ name: "no-deps", version: "1.0.0" }),
       "/@acme/vul/-/vul-1.0.0-rc.1.tgz": await tarball({ name: "@acme/vul", version: "1.0.0-rc.1" }),
+      // The URL of another name says nothing about this package.
+      "/other/-/other-2.0.0.tgz": await tarball({ name: "shim", version: "1.0.0" }),
     };
     await using server = startRegistry({ "no-deps": [adv("<1.0.1")] }, { bulkBodies, files });
     // The same paths on a host that is not the registry.
@@ -1924,12 +1926,14 @@ describe("`bun audit` of tarball and git dependencies", () => {
         "no-deps": at(server, "/no-deps/-/no-deps-1.0.0.tgz"),
         "@acme/vul": at(server, "/@acme/vul/-/vul-1.0.0-rc.1.tgz"),
         mirrored: at(mirror, "/no-deps/-/no-deps-1.0.0.tgz"),
+        renamed: at(server, "/other/-/other-2.0.0.tgz"),
       },
     }));
     await runBunInstall(installEnv(dir), dir);
     const recorded = await lock(dir);
     expect(recorded.match(/\{ "version": "[^"]+" \}/g)).toEqual([
       '{ "version": "1.0.0-rc.1" }',
+      '{ "version": "1.0.0" }',
       '{ "version": "1.0.0" }',
       '{ "version": "1.0.0" }',
     ]);
@@ -1946,13 +1950,14 @@ describe("`bun audit` of tarball and git dependencies", () => {
     await write(join(dir, "bun.lock"), recorded.replaceAll(/\{ "version": "[^"]+" \}/g, "{}"));
     const report = await audit(dir);
     expect(report.stdout).toContain("no-deps@1.0.0\n  (direct dependency)\n  high: test advisory (<1.0.1)");
-    expect(report.stderr).toBe(
-      `warn: cannot audit no-deps@${at(mirror, "/no-deps/-/no-deps-1.0.0.tgz")}: no version in lockfile\n` +
-        NO_VERSION_NOTE,
-    );
+    const unknown = [
+      `no-deps@${at(mirror, "/no-deps/-/no-deps-1.0.0.tgz")}`,
+      `shim@${at(server, "/other/-/other-2.0.0.tgz")}`,
+    ];
+    expect(report.stderr).toBe(`warn: cannot audit ${unknown.join(", ")}: no version in lockfile\n` + NO_VERSION_NOTE);
     expect(report.exitCode).toBe(1);
     const sent = { "no-deps": ["1.0.0"], "@acme/vul": ["1.0.0-rc.1"] };
-    expect(bulkBodies).toEqual([sent, sent]);
+    expect(bulkBodies).toEqual([{ ...sent, shim: ["1.0.0"] }, sent]);
 
     const fix = await auditFix(dir, "--dry-run");
     expect(fix.stdout).toContain(
@@ -1969,7 +1974,8 @@ describe("`bun audit` of tarball and git dependencies", () => {
       }),
       "/t/no-deps.tgz": await tarball({ name: "no-deps", version: "9.9.9" }),
     };
-    await using server = startRegistry({ vul: [malware], "no-deps": [{ ...malware, id: 8 }] }, { files });
+    const other = { ...adv(">=0", 8), title: "Malware in no-deps", severity: "critical", cwe: ["CWE-506"] };
+    await using server = startRegistry({ vul: [malware], "no-deps": [other] }, { files });
     using dir = await project(server, () => ({ dependencies: { vul: "github:owner/vul#abc1234" } }));
     expect((await run(dir, ["install"], dir, { GITHUB_API_URL: registryHref(server) })).exitCode).toBe(0);
 
@@ -2001,7 +2007,10 @@ describe("`bun audit` of tarball and git dependencies", () => {
     );
     await runBunInstall(installEnv(dir), dir);
     const counted = await audit(dir);
-    expect(counted.stdout).toContain("critical: Malware in vul (>=0) - https://example.invalid/advisory/8\n");
+    expect(counted.stdout).toContain(
+      `no-deps@1.0.0, 9.9.9\n  9.9.9 from ${registryHref(server)}/t/no-deps.tgz, matched by name\n  (direct dependency)\n` +
+        "  critical: Malware in no-deps (>=0) - https://example.invalid/advisory/8\n",
+    );
     expect(counted.stderr).toBe("");
     expect(counted.exitCode).toBe(1);
   });
@@ -2062,11 +2071,11 @@ describe("`bun audit` of tarball and git dependencies", () => {
     const url = `${registryHref(server)}/t/vul.tgz`;
     using dir = await project(server, () => ({ dependencies: { vul: url } }));
     await runBunInstall(installEnv(dir), dir);
-    expect(await lock(dir)).toContain(`"vul": ["vul@${url}", { "version": ${JSON.stringify(hostile)} }, "sha512-`);
+    expect(await lock(dir)).toContain(`"vul": ["vul@${url}", { "version": "1.0.0\\"\\u001B[31m\\n" }, "sha512-`);
 
     const report = await audit(dir);
     expect(bulkBodies).toEqual([{ vul: [hostile] }]);
-    expect(report.stdout).toContain(`vul@1.0.0"\\x1B[31m\\n\n  1.0.0"\\x1B[31m\\n from ${url}, matched by name\n`);
+    expect(report.stdout).toContain(`vul@1.0.0"\\x1b[31m\\n\n  1.0.0"\\x1b[31m\\n from ${url}, matched by name\n`);
     expect(report.exitCode).toBe(1);
 
     // Loaded again from bun.lock, the version is the same text.
@@ -2420,7 +2429,8 @@ describe("`bun audit` of tarball and git dependencies", () => {
 
     const report = await audit(dir);
     expect(report.stdout).toContain(vulAdvisory(url));
-    expect(report.stderr).toBe("");
+    // No warning: the only line says where the package list came from.
+    expect(report.stderr).toMatch(/^\[\d+\.\d+m?s\] migrated lockfile from package-lock\.json\n$/);
     expect(report.exitCode).toBe(1);
     expect(bulkBodies).toEqual([{ vul: ["1.0.0"] }]);
   });
