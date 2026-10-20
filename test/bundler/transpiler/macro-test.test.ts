@@ -1114,7 +1114,12 @@ describe("a macro import that is used outside of a call", () => {
         "outside.ts": `import { helper } from "./shared.ts";\nconsole.log("outside", helper());\n`,
         "cache": {},
       });
-      const env = { ...bunEnv, BUN_RUNTIME_TRANSPILER_CACHE_PATH: path.join(String(dir), "cache") };
+      const env = {
+        ...bunEnv,
+        BUN_RUNTIME_TRANSPILER_CACHE_PATH: path.join(String(dir), "cache"),
+        // A debug build reads the cache only with this.
+        BUN_DEBUG_ENABLE_RESTORE_FROM_TRANSPILER_CACHE: "1",
+      };
       for (const [file, expected] of [
         ["inside.ts", { lines: ["inside helper"], stderr: "", exitCode: 0 }],
         ["outside.ts", { lines: [""], stderr: expect.stringContaining(notDefined("m")), exitCode: 1 }],
