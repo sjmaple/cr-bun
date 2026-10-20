@@ -2751,6 +2751,26 @@ test.concurrent(
   },
 );
 
+// The member's own copy is needless only if the hoisted package is installed. A link in the place
+// of the hoisted package is not that package, whatever it leads to.
+test.concurrent("hoisted: a link is not the hoisted copy of a registry package", async () => {
+  const dir = await setupWorkspaces("hoisted", {
+    root: { dependencies: { "no-deps": "2.0.0" } },
+    packages: { member: { dependencies: { "no-deps": "2.0.0" } } },
+  });
+  const hoisted = join(dir, "node_modules", "no-deps");
+  const copy = join(dir, "packages", "member", "node_modules", "no-deps");
+  mkdirSync(copy, { recursive: true });
+  for (const name of readdirSync(hoisted)) copyFileSync(join(hoisted, name), join(copy, name));
+  rmSync(hoisted, { recursive: true });
+  linkOutside(dir, "node_modules/no-deps", { "package.json": JSON.stringify({ name: "no-deps", version: "2.0.0" }) });
+
+  const { stderr, exitCode } = await prune(dir);
+  expect(out(stderr)).toBe(`${WARN("node_modules/no-deps", "packages/member/node_modules/no-deps")}\n${NOTE}`);
+  expect(readdirSync(copy).sort()).toEqual(["index.js", "package.json"]);
+  expect(exitCode).toBe(0);
+});
+
 // name -> version -> dependencies. The fixture registry has no package whose versions have different names below them.
 async function serveGraph(graph: Record<string, Record<string, Record<string, string>>>) {
   const tarballs = new Map<string, Uint8Array>();

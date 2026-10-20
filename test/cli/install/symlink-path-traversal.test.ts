@@ -1,5 +1,7 @@
 import { spawn } from "bun";
-import { describe, expect, it, setDefaultTimeout } from "bun:test";
+import { openatNoSymlinks } from "bun:internal-for-testing";
+import { afterAll, beforeAll, describe, expect, it, setDefaultTimeout } from "bun:test";
+import { readFileSync } from "fs";
 import {
   access,
   chmod,
@@ -15,11 +17,12 @@ import {
   symlink,
   writeFile,
 } from "fs/promises";
-import { bunExe, bunEnv as env, tempDir } from "harness";
+import { bunExe, type DirectoryTree, bunEnv as env, isLinux, readdirSorted, tempDir } from "harness";
 import { createHash } from "node:crypto";
 import { createServer } from "node:http";
 import { tmpdir } from "os";
 import { basename, dirname, join, relative, resolve } from "path";
+import { TestRegistry } from "registry";
 
 // This test validates the fix for a symlink path traversal vulnerability in tarball extraction.
 // CVE: Path traversal via symlink when installing packages
@@ -1544,6 +1547,510 @@ describe.concurrent("links below node_modules with the hoisted linker", () => {
     expect((await Bun.file(join(repo, "package.json")).json()).dependencies).toEqual({ plain: "file:./plain" });
     expect(stderr).not.toContain("error:");
     expect(exitCode).toBe(0);
+  });
+});
+
+// A package from the cache (npm, git, tarball) is a directory of its own, and so is every folder
+// between it and the `node_modules` of the project or of a workspace. `bun install` checks an
+// installed package with an open that refuses a link in those folders. A link in the place of
+// one is replaced, and nothing is installed behind it. What the link leads to is never touched.
+describe.concurrent("links in the place of a package from the cache, with the hoisted linker", () => {
+  const registry = new TestRegistry();
+  beforeAll(() => registry.start());
+  afterAll(() => registry.stop());
+
+  // FreeBSD has no such open, and neither has a Linux that refuses `openat2`. There the linker
+  // reads through a link, as before.
+  const hasOpen = openatNoSymlinks(import.meta.dir, basename(import.meta.path)) !== null;
+
+  // The registry has one-one-dep@1.0.0 -> one-dep@1.0.0 -> no-deps@1.0.1. A root with
+  // no-deps@2.0.0 makes no-deps@1.0.1 install below one-dep.
+  const hoisted = `[install]\nlinker = "hoisted"\n`;
+  const dependencies = { "no-deps": "2.0.0", "one-dep": "1.0.0" };
+  const project = (manifest: object) => ({ "package.json": JSON.stringify(manifest), "bunfig.toml": hoisted });
+  const app = project({ name: "app", dependencies });
+  // A folder of the user's with the name and the version of a published package.
+  const folder = (name: string, version: string, more: object = {}) => ({
+    "package.json": JSON.stringify({ name, version }),
+    "own.txt": "",
+    ...more,
+  });
+  // Its own installed dependency is in the place where the published package has another version.
+  const checkoutOf = (name: string) =>
+    folder(name, "1.0.0", { node_modules: { "no-deps": folder("no-deps", "2.0.0") } });
+  const checkout = checkoutOf("one-dep");
+  const ownFiles = ["own.txt", "package.json"];
+
+  const workspaces = (dependencies: object, folders = ["packages/*"]) =>
+    project({ name: "root", workspaces: folders, dependencies });
+  const manifest = (name: string, dependencies: object) => ({
+    "package.json": JSON.stringify({ name, version: "1.0.0", dependencies }),
+  });
+  const member = manifest("member", { "no-deps": "1.0.0", "@types/no-deps": "2.0.0" });
+  // A package in each kind of place: the root, an `@scope`, below a package, below a workspace.
+  const inPlaces = { ...workspaces({ ...dependencies, "@types/no-deps": "1.0.0" }), packages: { member } };
+  const places = [
+    "node_modules/no-deps",
+    "node_modules/@types/no-deps",
+    "node_modules/one-dep",
+    "node_modules/one-dep/node_modules/no-deps",
+    "packages/member/node_modules/no-deps",
+    "packages/member/node_modules/@types/no-deps",
+  ];
+  // And a package with a bin, and one below a `file:` dependency.
+  const everywhere = {
+    ...workspaces({ ...dependencies, "@types/no-deps": "1.0.0", "what-bin": "1.0.0", local: "file:./local" }),
+    packages: { member },
+    local: manifest("local", { "no-deps": "1.0.0" }),
+  };
+  const belowLocal = "node_modules/local/node_modules/no-deps";
+  // A dependency of the root has the name of the workspace, so the workspace has no link in the
+  // root `node_modules`.
+  const unlinkedMember = {
+    ...workspaces({ "no-deps": "2.0.0", member: "npm:no-deps@1.1.0" }),
+    packages: { member: manifest("member", { "no-deps": "1.0.0" }) },
+  };
+  // `other` gets its own link to `member`, and a-dep@1.0.2 is installed below that link.
+  const memberBelowMember = {
+    ...workspaces({ "a-dep": "1.0.2", member: "npm:no-deps@1.1.0" }),
+    packages: {
+      member: manifest("member", { "a-dep": "1.0.2" }),
+      other: manifest("other", { member: "workspace:*", "a-dep": "1.0.3" }),
+    },
+  };
+  // The workspace is outside the project, and one-dep has a `node_modules` of its own in it.
+  const outside = {
+    proj: workspaces({ "no-deps": "2.0.0", "one-dep": "npm:no-deps@1.1.0" }, ["../app"]),
+    app: manifest("app", { "no-deps": "1.0.0", "one-dep": "1.0.0" }),
+  };
+  // The user made `packages` a link to `real`.
+  const behindLink = {
+    ...workspaces({ "no-deps": "2.0.0" }),
+    real: { member: manifest("member", { "no-deps": "1.0.0" }) },
+  };
+  const linkPackages = (root: string) => linkDir("real", join(root, "packages"));
+  // The user made the workspace's own `node_modules` a link.
+  const linkedNodeModules = {
+    ...workspaces({ "no-deps": "2.0.0" }),
+    packages: { member: manifest("member", { "no-deps": "1.0.0" }) },
+    elsewhere: {},
+  };
+  const linkNodeModules = (root: string) =>
+    linkDir(join("..", "..", "elsewhere"), join(root, "packages", "member", "node_modules"));
+  const tarball = readFileSync(join(import.meta.dir, "registry", "packages", "no-deps", "no-deps-1.0.0.tgz"));
+  const patch = [
+    "diff --git a/index.js b/index.js",
+    "--- a/index.js",
+    "+++ b/index.js",
+    "@@ -1,2 +1,3 @@",
+    " module.exports = require(`./package.json`);",
+    "+// patched",
+    " ",
+    "",
+  ].join("\n");
+
+  // Each test has its own global directory and its own cache.
+  function commands(root: string, more: Record<string, string> = {}) {
+    async function run(cwd: string, ...args: string[]) {
+      await using proc = spawn({
+        cmd: [bunExe(), ...args],
+        cwd: join(root, cwd),
+        env: {
+          ...env,
+          ...more,
+          BUN_INSTALL: join(root, ".bun"),
+          BUN_INSTALL_CACHE_DIR: join(root, ".cache"),
+          BUN_CONFIG_REGISTRY: registry.registryUrl(),
+        },
+        stdout: "pipe",
+        stderr: "pipe",
+        stdin: "ignore",
+      });
+      const [stdout, stderr, exitCode] = await Promise.all([proc.stdout.text(), proc.stderr.text(), proc.exited]);
+      return { stdout, stderr, exitCode };
+    }
+    async function bun(cwd: string, ...args: string[]) {
+      const { stdout, stderr, exitCode } = await run(cwd, ...args);
+      expect(stderr).not.toContain("error:");
+      expect(exitCode).toBe(0);
+      return { stdout, stderr };
+    }
+    return { run, bun };
+  }
+
+  const isLink = (path: string) =>
+    readlink(path).then(
+      () => true,
+      () => false,
+    );
+  async function replaceWithLink(target: string, path: string) {
+    await rm(path, { recursive: true, force: true });
+    await linkDir(target, path);
+  }
+  const versionOf = async (dir: string) => (await Bun.file(join(dir, "package.json")).json()).version;
+  const linesWith = (text: string, stderr: string) => stderr.split("\n").filter(line => line.includes(text));
+
+  // The text of each file below `dir`, with its mode where the system has one.
+  async function snapshot(dir: string) {
+    const files: Record<string, string> = {};
+    for (const name of (await readdir(dir, { recursive: true })).sort()) {
+      const stats = await lstat(join(dir, name));
+      if (stats.isSymbolicLink()) files[name] = `-> ${await readlink(join(dir, name))}`;
+      if (!stats.isFile()) continue;
+      const mode = isWindows ? "" : (stats.mode & 0o777).toString(8);
+      files[name] = `${mode} ${await Bun.file(join(dir, name)).text()}`;
+    }
+    return files;
+  }
+
+  // Installs, puts a link to a copy of the folder at `place` in its place, and installs again.
+  // The copy has the name and the version that the lockfile has for the place.
+  async function relink(root: string, cwd: string, place: string, more: Record<string, string> = {}) {
+    const { bun, run } = commands(root, more);
+    const slot = join(root, place);
+    const victim = join(root, "victim");
+
+    await bun(cwd, "install");
+    const installed = await snapshot(slot);
+    await cp(slot, victim, { recursive: true });
+    await writeFile(join(victim, "own.txt"), "");
+    if (await Bun.file(join(victim, "what-bin.js")).exists()) {
+      // The bin linker makes the file of a bin executable and rewrites a `\r\n` after its `#!`.
+      await writeFile(join(victim, "what-bin.js"), "#!/usr/bin/env node\r\n");
+      await chmod(join(victim, "what-bin.js"), 0o600);
+    }
+    const before = await snapshot(victim);
+    await replaceWithLink(victim, slot);
+
+    const { stdout, stderr, exitCode } = await run(cwd, "install");
+    return {
+      result: {
+        link: await isLink(slot),
+        victim: await snapshot(victim),
+        stderr: linesWith("error", stderr),
+        exitCode,
+      },
+      stdout,
+      slot,
+      installed,
+      before,
+    };
+  }
+
+  // Installs twice. A file that the first copy of a package got is gone if the second install
+  // made another copy.
+  async function placesKept(root: string, cwd: string, places: string[], ...flags: string[]) {
+    const { bun } = commands(root);
+    await bun(cwd, "install", ...flags);
+    for (const place of places) await writeFile(join(root, place, "kept.txt"), "");
+
+    await bun(cwd, "install", ...flags);
+    return Promise.all(
+      places.map(place =>
+        access(join(root, place, "kept.txt")).then(
+          () => true,
+          () => false,
+        ),
+      ),
+    );
+  }
+
+  // The last element of a row makes the links that the user has in the project.
+  const noLinks = async () => {};
+  const keptRows: [string, DirectoryTree, string, string[], (root: string) => Promise<void>][] = [
+    ["every kind of place", everywhere, ".", [...places, "node_modules/what-bin", belowLocal], noLinks],
+    [
+      "a workspace that has no link in the root",
+      unlinkedMember,
+      ".",
+      ["packages/member/node_modules/no-deps"],
+      noLinks,
+    ],
+    ["a workspace below a workspace", memberBelowMember, ".", ["packages/member/node_modules/a-dep"], noLinks],
+    [
+      "a workspace outside the project",
+      outside,
+      "proj",
+      ["app/node_modules/no-deps", "app/node_modules/one-dep", "app/node_modules/one-dep/node_modules/no-deps"],
+      noLinks,
+    ],
+    ["a workspace behind a link", behindLink, ".", ["real/member/node_modules/no-deps"], linkPackages],
+    [
+      "a workspace whose node_modules is a link",
+      linkedNodeModules,
+      ".",
+      ["packages/member/node_modules/no-deps"],
+      linkNodeModules,
+    ],
+  ];
+  it.each(keptRows)("keeps the packages that are installed in %s", async (_, files, cwd, places, links) => {
+    using dir = tempDir("nm-cache-", files);
+    await links(String(dir));
+    expect(await placesKept(String(dir), cwd, places)).toEqual(places.map(() => true));
+  });
+
+  // Windows needs a privilege to make a symlink to a file.
+  it.skipIf(isWindows)("keeps a package whose files are symlinks", async () => {
+    using dir = tempDir("nm-cache-", inPlaces);
+    expect(await placesKept(String(dir), ".", places, "--backend=symlink")).toEqual(places.map(() => true));
+  });
+
+  // One row for each kind of folder that the installer makes, and for each kind of package
+  // from the cache.
+  const linkRows: [string, () => DirectoryTree, string][] = [
+    ["a package", () => everywhere, "node_modules/no-deps"],
+    ["a package with a bin", () => everywhere, "node_modules/what-bin"],
+    ["a scoped package", () => everywhere, "node_modules/@types/no-deps"],
+    ["an @scope", () => everywhere, "node_modules/@types"],
+    ["a package with dependencies", () => everywhere, "node_modules/one-dep"],
+    ["the node_modules of a package", () => everywhere, "node_modules/one-dep/node_modules"],
+    ["a package below a package", () => everywhere, "node_modules/one-dep/node_modules/no-deps"],
+    ["a package of a workspace", () => everywhere, "packages/member/node_modules/no-deps"],
+    ["an @scope of a workspace", () => everywhere, "packages/member/node_modules/@types"],
+    [
+      "a package of a workspace that has no link in the root",
+      () => unlinkedMember,
+      "packages/member/node_modules/no-deps",
+    ],
+    [
+      "a tarball from a URL",
+      () =>
+        project({ name: "root", dependencies: { "no-deps": `${registry.registryUrl()}no-deps/-/no-deps-1.0.0.tgz` } }),
+      "node_modules/no-deps",
+    ],
+    [
+      "a tarball from a file",
+      () => ({
+        ...project({ name: "root", dependencies: { "no-deps": "file:./no-deps-1.0.0.tgz" } }),
+        "no-deps-1.0.0.tgz": tarball,
+      }),
+      "node_modules/no-deps",
+    ],
+    [
+      "a patched package",
+      () => ({
+        ...project({
+          name: "root",
+          dependencies: { "no-deps": "1.0.0" },
+          patchedDependencies: { "no-deps@1.0.0": "patches/no-deps@1.0.0.patch" },
+        }),
+        patches: { "no-deps@1.0.0.patch": patch },
+      }),
+      "node_modules/no-deps",
+    ],
+  ];
+  it.skipIf(!hasOpen).each(linkRows)("replaces a link at %s", async (_, files, place) => {
+    using dir = tempDir("nm-cache-", files());
+    const root = String(dir);
+    const bin = join(root, "node_modules", ".bin", "what-bin");
+
+    const { result, slot, installed, before } = await relink(root, ".", place);
+    expect({
+      ...result,
+      slot: await snapshot(slot),
+      // On Windows the bin is a shim.
+      bin: !isWindows && (await Bun.file(bin).exists()) ? relative(await realpath(root), await realpath(bin)) : null,
+    }).toEqual({
+      link: false,
+      victim: before,
+      stderr: [],
+      exitCode: 0,
+      slot: installed,
+      bin: !isWindows && files() === everywhere ? join("node_modules", "what-bin", "what-bin.js") : null,
+    });
+  });
+
+  // No open that refuses a link can start at these places: the path from the project has one of
+  // bun's own links, or one of the user's. The last row is a system that has no such open at
+  // all. The linker reads through the link there, as before.
+  const keepsLinkRows: [string, DirectoryTree, string, string, (root: string) => Promise<void>][] = [
+    ["below a file: dependency", everywhere, ".", belowLocal, noLinks],
+    ["in a workspace below a workspace", memberBelowMember, ".", "packages/member/node_modules/a-dep", noLinks],
+    ["in a workspace outside the project", outside, "proj", "app/node_modules/one-dep/node_modules/no-deps", noLinks],
+    ["in a workspace behind a link", behindLink, ".", "real/member/node_modules/no-deps", linkPackages],
+  ];
+  it.each(keepsLinkRows)("keeps a link %s", async (_, files, cwd, place, links) => {
+    using dir = tempDir("nm-cache-", files);
+    await links(String(dir));
+    const { result, stdout, before } = await relink(String(dir), cwd, place);
+    expect(stdout).toContain("(no changes)");
+    expect(result).toEqual({ link: true, victim: before, stderr: [], exitCode: 0 });
+  });
+
+  // Android answers `openat2` with a signal, so bun does not call it there. The test host's
+  // kernel release isn't Android's, and this environment makes bun detect Android.
+  it.skipIf(!isLinux)("keeps a link on a system that has no open that refuses links", async () => {
+    using dir = tempDir("nm-cache-", { ...app, system: { bin: { linker64: "" } } });
+    const root = String(dir);
+    const android = { ANDROID_ROOT: join(root, "system"), ANDROID_DATA: "/data" };
+    const { result, stdout, before } = await relink(root, ".", "node_modules/one-dep", android);
+    expect(stdout).toContain("(no changes)");
+    expect(result).toEqual({ link: true, victim: before, stderr: [], exitCode: 0 });
+  });
+
+  // What the checkout and the place of the package are when the link was replaced.
+  async function stateOf(root: string, slot: string) {
+    const own = join(root, "checkout", "node_modules", "no-deps");
+    return {
+      slot: {
+        link: await isLink(slot),
+        files: await readdirSorted(slot),
+        "no-deps": await versionOf(join(slot, "node_modules", "no-deps")),
+      },
+      checkout: {
+        files: await readdirSorted(join(root, "checkout")),
+        "no-deps": { files: await readdirSorted(own), version: await versionOf(own) },
+      },
+    };
+  }
+  const untouched = { files: ["node_modules", ...ownFiles], "no-deps": { files: ownFiles, version: "2.0.0" } };
+  const replaced = {
+    slot: { link: false, files: ["node_modules", "package.json"], "no-deps": "1.0.1" },
+    checkout: untouched,
+  };
+
+  it.skipIf(!hasOpen)("does not install below a link to a folder with the name and the version", async () => {
+    using dir = tempDir("nm-cache-", { checkout, app });
+    const root = String(dir);
+    const { bun } = commands(root);
+    const slot = join(root, "app", "node_modules", "one-dep");
+
+    await bun("app", "install");
+    await replaceWithLink(join(root, "checkout"), slot);
+
+    await bun("app", "install");
+    expect(await stateOf(root, slot)).toEqual(replaced);
+  });
+
+  it.skipIf(!hasOpen)("replaces a link that stays inside node_modules", async () => {
+    using dir = tempDir("nm-cache-", { app: { ...app, node_modules: { ".kept": checkout } } });
+    const root = String(dir);
+    const { bun } = commands(root);
+    const slot = join(root, "app", "node_modules", "one-dep");
+    const kept = join(root, "app", "node_modules", ".kept");
+
+    await bun("app", "install");
+    await replaceWithLink(kept, slot);
+
+    await bun("app", "install");
+    expect({
+      link: await isLink(slot),
+      "no-deps": await versionOf(join(slot, "node_modules", "no-deps")),
+      kept: await versionOf(join(kept, "node_modules", "no-deps")),
+    }).toEqual({ link: false, "no-deps": "1.0.1", kept: "2.0.0" });
+  });
+
+  it.skipIf(!hasOpen)("does not install into the cache through a link", async () => {
+    using dir = tempDir("nm-cache-", { app });
+    const root = String(dir);
+    const { bun } = commands(root);
+    const slot = join(root, "app", "node_modules", "one-dep");
+
+    await bun("app", "install");
+    const entry = (await readdirSorted(join(root, ".cache"))).find(name => name.startsWith("one-dep@1.0.0"))!;
+    await replaceWithLink(join(root, ".cache", entry), slot);
+
+    await bun("app", "install");
+    expect({
+      link: await isLink(slot),
+      "no-deps": await versionOf(join(slot, "node_modules", "no-deps")),
+      cache: await readdirSorted(join(root, ".cache", entry)),
+    }).toEqual({ link: false, "no-deps": "1.0.1", cache: ["package.json"] });
+  });
+
+  // The lockfile names a tarball of the package that the registry does not have.
+  async function breakPackage(lockfile: string, name: string, version: string) {
+    const missing = `${registry.registryUrl()}${name}/-/${name}-0.0.0.tgz`;
+    const row = `["${name}@${version}", "`;
+    const [head, ...rows] = (await Bun.file(lockfile).text()).split(row);
+    expect(rows.length).toBeGreaterThan(0);
+    await writeFile(lockfile, [head, ...rows.map(rest => missing + rest.slice(rest.indexOf('"')))].join(row));
+    return missing;
+  }
+  const emptyCache = (root: string) => rm(join(root, ".cache"), { recursive: true, force: true });
+  const cannotInstallThrough = (link: string, owner: string) => [
+    `ELOOP: cannot install through symlink ${link}, the packages below ${owner} are missing`,
+    "note: remove the link and run 'bun install'",
+  ];
+  const reported = (stderr: string) => [...linesWith("ELOOP", stderr), ...linesWith("note:", stderr)];
+
+  // two-range-deps has two dependencies, and the root has another package under each name.
+  it.skipIf(!hasOpen)("does not install below a link when the package in its place fails", async () => {
+    const dependencies = { "no-deps": "2.0.0", "@types/is-number": "npm:no-deps@1.0.0", "two-range-deps": "1.0.0" };
+    using dir = tempDir("nm-cache-", {
+      checkout: checkoutOf("two-range-deps"),
+      app: project({ name: "app", dependencies }),
+    });
+    const root = String(dir);
+    const { bun, run } = commands(root);
+    const slot = join(root, "app", "node_modules", "two-range-deps");
+
+    await bun("app", "install");
+    expect(await readdirSorted(join(slot, "node_modules"))).toEqual(["@types", "no-deps"]);
+    const missing = await breakPackage(join(root, "app", "bun.lock"), "two-range-deps", "1.0.0");
+    await emptyCache(root);
+    await replaceWithLink(join(root, "checkout"), slot);
+
+    const { stderr, exitCode } = await run("app", "install");
+    expect(stderr).toContain(`error: GET ${missing} - 404`);
+    // Once for the two packages.
+    expect(reported(stderr)).toEqual(cannotInstallThrough(join("node_modules", "two-range-deps"), "two-range-deps"));
+    expect({ exitCode, link: await isLink(slot), checkout: (await stateOf(root, slot)).checkout }).toEqual({
+      exitCode: 1,
+      link: true,
+      checkout: untouched,
+    });
+  });
+
+  it.skipIf(!hasOpen)("does not fail for what is below an optional package that fails", async () => {
+    using dir = tempDir("nm-cache-", {
+      checkout,
+      app: project({
+        name: "app",
+        dependencies: { "no-deps": "2.0.0" },
+        optionalDependencies: { "one-dep": "1.0.0" },
+      }),
+    });
+    const root = String(dir);
+    const { bun, run } = commands(root);
+    const slot = join(root, "app", "node_modules", "one-dep");
+
+    await bun("app", "install");
+    await breakPackage(join(root, "app", "bun.lock"), "one-dep", "1.0.0");
+    await emptyCache(root);
+    await replaceWithLink(join(root, "checkout"), slot);
+
+    const { stderr, exitCode } = await run("app", "install");
+    expect(reported(stderr)).toEqual([]);
+    expect({ exitCode, link: await isLink(slot), checkout: (await stateOf(root, slot)).checkout }).toEqual({
+      exitCode: 0,
+      link: true,
+      checkout: untouched,
+    });
+  });
+
+  // one-dep is not in the cache, and the package below it is.
+  it.skipIf(!hasOpen)("reports only the package that a link keeps out with --offline", async () => {
+    using dir = tempDir("nm-cache-", { checkout, app });
+    const root = String(dir);
+    const { bun, run } = commands(root);
+    const slot = join(root, "app", "node_modules", "one-dep");
+
+    await bun("app", "install");
+    for (const entry of await readdirSorted(join(root, ".cache"))) {
+      if (entry.startsWith("one-dep")) await rm(join(root, ".cache", entry), { recursive: true, force: true });
+    }
+    await replaceWithLink(join(root, "checkout"), slot);
+
+    const { stderr, exitCode } = await run("app", "install", "--offline");
+    expect([...linesWith("error:", stderr), ...reported(stderr)]).toEqual([
+      `error: --offline: "one-dep" is not in the cache`,
+    ]);
+    expect({ exitCode, link: await isLink(slot), checkout: (await stateOf(root, slot)).checkout }).toEqual({
+      exitCode: 1,
+      link: true,
+      checkout: untouched,
+    });
   });
 });
 
