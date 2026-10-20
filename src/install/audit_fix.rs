@@ -29,7 +29,7 @@ mod package_json_edits;
 pub use crate::lockfile_real::RecordedVersion;
 pub use package_json_edits::{EditSite, OverrideSelector, PackageJsonEdit};
 
-/// A fetched package and the version that the lockfile records for it.
+/// A row of a fetched package, and its version. The lockfile can have a row that no dependency leads to.
 pub struct AuditRow<'a> {
     pub id: PackageID,
     pub name: &'a [u8],

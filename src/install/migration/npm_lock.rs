@@ -486,9 +486,9 @@ impl<'a> Migrator<'a> {
 
         let id = self.this.packages.len() as PackageID;
         meta.id = id;
-        if res.tag.records_package_json_version() {
-            // npm writes the key for every package that has a version.
-            let version = (pkg.get(b"version").and_then(|v| v.as_str())).unwrap_or_default();
+        if res.tag.records_package_json_version()
+            && let Some(version) = pkg.get(b"version").and_then(|v| v.as_str())
+        {
             let version = self.this.string_buf().append(recordable_version(version))?;
             meta.record_version(version);
         }

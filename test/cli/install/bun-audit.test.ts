@@ -2421,7 +2421,7 @@ describe("`bun audit` of tarball and git dependencies", () => {
         packages: {
           "": { name: "foo", dependencies: { vul: url, nover: `${url}?nover` } },
           "node_modules/vul": { version: "1.0.0", resolved: url, integrity },
-          // npm writes no version for a package that declares none.
+          // A node with no version does not prove that the package has none, so the row is named.
           "node_modules/nover": { resolved: `${url}?nover`, integrity },
         },
       }),
@@ -2429,8 +2429,11 @@ describe("`bun audit` of tarball and git dependencies", () => {
 
     const report = await audit(dir);
     expect(report.stdout).toContain(vulAdvisory(url));
-    // No warning: the only line says where the package list came from.
-    expect(report.stderr).toMatch(/^\[\d+\.\d+m?s\] migrated lockfile from package-lock\.json\n$/);
+    expect(report.stderr.replace(/^\[\d+\.\d+m?s\] /, "")).toBe(
+      "migrated lockfile from package-lock.json\n" +
+        `warn: cannot audit nover@${url}?nover: no version in lockfile\n` +
+        NO_VERSION_NOTE,
+    );
     expect(report.exitCode).toBe(1);
     expect(bulkBodies).toEqual([{ vul: ["1.0.0"] }]);
   });
