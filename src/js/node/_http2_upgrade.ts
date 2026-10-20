@@ -1,6 +1,4 @@
 const { Duplex } = require("node:stream");
-const { getTimerDuration } = require("internal/timers");
-const { validateFunction } = require("internal/validators");
 const upgradeDuplexToTLS = $newRustFunction("runtime/socket/socket.rs", "jsUpgradeDuplexToTLS", 2);
 const reportError = globalThis.reportError;
 
@@ -22,7 +20,6 @@ interface UpgradeContextType {
   nativeHandle: NativeHandle | null;
   events: UpgradeEvents | null;
   handedOver: boolean;
-  timer: ReturnType<typeof setTimeout> | undefined;
 }
 
 interface Http2SecureServer {
@@ -52,8 +49,6 @@ interface TLSProxySocket extends DuplexStream {
   secureConnecting: boolean;
   _secureEstablished: boolean;
   authorizationError?: string;
-  timeout?: number;
-  setTimeout(msecs: number, callback?: () => void): this;
 }
 
 /**
@@ -72,7 +67,6 @@ function UpgradeContext(
   this.nativeHandle = null;
   this.events = null;
   this.handedOver = false;
-  this.timer = undefined;
 }
 
 // ---------------------------------------------------------------------------
@@ -99,7 +93,6 @@ function tlsSocketWrite(this: TLSProxySocket, chunk: Buffer, encoding: string, c
     callback(new Error("Socket is closed"));
     return;
   }
-  this._ctx.timer?.refresh();
   // $write returns true if fully flushed, false if buffered
   if (h.$write(chunk, encoding)) {
     callback();
@@ -114,16 +107,13 @@ function tlsSocketWrite(this: TLSProxySocket, chunk: Buffer, encoding: string, c
 // Mirrors net.ts Socket.prototype._destroy.
 function tlsSocketDestroy(this: TLSProxySocket, err: Error | null, callback: (err?: Error | null) => void) {
   const ctx = this._ctx;
-  clearTimeout(ctx.timer);
   const h = ctx.nativeHandle;
   if (h) {
     h.close();
     ctx.nativeHandle = null;
   }
-  const raw = ctx.rawSocket;
-  // Nothing of the application's is on its way on a socket it never got. Else the raw socket is destroyed when it has sent what it took.
-  if (!ctx.handedOver || raw.writableFinished) raw.destroy();
-  else raw.once("finish", destroyRawSocket);
+  // Nothing of the application's is on its way on a socket it never got. Else the raw socket closes when it has sent what it took.
+  if (!ctx.handedOver) ctx.rawSocket.destroy();
   // Must invoke pending write callback with error per Writable stream contract
   const writeCb = this._writeCallback;
   if (writeCb) {
@@ -131,40 +121,6 @@ function tlsSocketDestroy(this: TLSProxySocket, err: Error | null, callback: (er
     writeCb(err ?? new Error("Socket destroyed"));
   }
   callback(err);
-}
-
-function destroyRawSocket(this: import("node:net").Socket) {
-  this.destroy();
-}
-
-// net.Socket#setTimeout() with a timer of this stand-in's own. The raw socket's timer would count the handshake and empty TLS records as activity.
-function tlsSocketSetTimeout(this: TLSProxySocket, msecs: number, callback?: () => void) {
-  if (this.destroyed) return this;
-  this.timeout = msecs;
-  msecs = getTimerDuration(msecs, "msecs");
-  const ctx = this._ctx;
-  clearTimeout(ctx.timer);
-  ctx.timer = undefined;
-  if (msecs === 0) {
-    if (callback !== undefined) {
-      validateFunction(callback, "callback");
-      this.removeListener("timeout", callback);
-    }
-  } else {
-    ctx.timer = setTimeout(tlsSocketOnTimeout.bind(this), msecs).unref();
-    if (callback !== undefined) {
-      validateFunction(callback, "callback");
-      this.once("timeout", callback);
-    }
-  }
-  return this;
-}
-
-// As net.Socket#_onTimeout: no timeout while a write is in flight. A write of this stand-in is done when the TLS layer took it, so the raw socket tells.
-function tlsSocketOnTimeout(this: TLSProxySocket) {
-  const ctx = this._ctx;
-  if (this._writeCallback || ctx.rawSocket.writableLength > 0) return void ctx.timer?.refresh();
-  this.emit("timeout");
 }
 
 // _final: called when the writable side is ending (all data flushed).
@@ -190,7 +146,6 @@ function socketOpen() {}
 // data: called with decrypted plaintext after the TLS layer decrypts incoming data.
 // Push into tlsSocket so the H2 session's _read() receives these frames.
 function socketData(this: TLSProxySocket, _socket: NativeHandle, chunk: Buffer) {
-  this._ctx.timer?.refresh();
   let full;
   // As net.ts: what a 'data' listener throws is an uncaught exception, as in Node, and no error of this socket.
   try {
@@ -210,8 +165,6 @@ function socketEnd(this: TLSProxySocket) {
 // drain: raw socket is writable again after being full; propagate backpressure signal.
 // If _write stored a callback waiting for drain, invoke it now.
 function socketDrain(this: TLSProxySocket) {
-  // The raw socket has sent what it held: the idle time counts from here, as from the end of a write in net.Socket.
-  this._ctx.timer?.refresh();
   const cb = this._writeCallback;
   if (cb) {
     this._writeCallback = null;
@@ -300,12 +253,7 @@ function socketHandshake(
   // This is the same function passed to Http2SecureServer's constructor
   // and is what normally fires on the 'secureConnection' event.
   ctx.handedOver = true;
-  // As net.ts: what the listener throws is an uncaught exception, as in Node, and no error of this socket.
-  try {
-    ctx.connectionListener.$call(ctx.server, tlsSocket);
-  } catch (err) {
-    reportError(err);
-  }
+  ctx.connectionListener.$call(ctx.server, tlsSocket);
 
   // Resume the Duplex so the H2 session can read frames from it. The accept
   // path in net.ts ServerHandlers.handshake only read(0)s (node's manualStart
@@ -378,8 +326,6 @@ function upgradeRawSocketToH2(
   tlsSocket._write = tlsSocketWrite;
   tlsSocket._destroy = tlsSocketDestroy;
   tlsSocket._final = tlsSocketFinal;
-  tlsSocket.setTimeout = tlsSocketSetTimeout;
-  tlsSocket.timeout = 0;
 
   // Suppress unhandled error events until the H2 session attaches its own error handler
   tlsSocket.on("error", noop);

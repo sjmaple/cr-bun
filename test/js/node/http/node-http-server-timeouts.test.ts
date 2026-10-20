@@ -1223,7 +1223,7 @@ describe("node:http server timeouts on a connection from server.emit('connection
   test("a sweep passes a tunnel socket that came back to the server and died with its 'close' listeners removed", async () => {
     const requestSeen = Promise.withResolvers<net.Socket>();
     const server = http.createServer(
-      { headersTimeout: 1, requestTimeout: 60_000, connectionsCheckingInterval: 60_000 },
+      { headersTimeout: 60_000, requestTimeout: 60_000, connectionsCheckingInterval: 60_000 },
       req => {
         // The listener's cleanup is a 'close' listener. Without it the server keeps the dead socket, with no parser.
         req.socket.removeAllListeners("close");
@@ -1252,13 +1252,11 @@ describe("node:http server timeouts on a connection from server.emit('connection
       await deadClosed;
       expect(sweep).not.toThrow();
 
-      // The sweep still reaches the connections behind the dead one.
-      live.socket.write("GET / HTTP/1.1\r\nHo");
+      // The sweep still reaches the connections behind the dead one. The live tunnel has sent nothing, so
+      // the server closes it with nothing unread: the 408 arrives whole on every platform.
+      server.headersTimeout = 1;
       await clockPasses(5);
-      while (!live.socket.destroyed && !live.received().includes("HTTP/1.1 408")) {
-        sweep();
-        await clockPasses(1);
-      }
+      sweep();
       expect(await live.closed).toEndWith(requestTimeoutResponse);
     } finally {
       dead.socket.destroy();
@@ -1649,18 +1647,12 @@ describe("node:http server timeouts on an HTTP/1.1 connection of an http2 server
   // A net.Server accepts the connection and gives the raw socket to the server, which does the TLS
   // handshake itself. The server listens too: its sweep timer starts there.
   const fronts: net.Server[] = [];
-  // The raw sockets that a front gave to the server in this test. Empty when the server accepts itself.
-  const rawSockets: net.Socket[] = [];
   afterEach(() => {
     for (const front of fronts.splice(0)) front.close();
-    for (const raw of rawSockets.splice(0)) raw.destroy();
   });
   async function listenBehindFront(server: http2.Http2SecureServer) {
     await listenOn(server);
-    const front = net.createServer(socket => {
-      rawSockets.push(socket);
-      server.emit("connection", socket);
-    });
+    const front = net.createServer(socket => void server.emit("connection", socket));
     fronts.push(front);
     await once(front.listen(0, "127.0.0.1"), "listening");
     return (front.address() as net.AddressInfo).port;
@@ -1720,9 +1712,8 @@ describe("node:http server timeouts on an HTTP/1.1 connection of an http2 server
     };
   }
 
-  describe.each(Object.keys(entries) as (keyof typeof entries)[])("when %s", entry => {
-    const listenOn = entries[entry];
-
+  // The socket timers. The server accepts these connections itself: each one is a TLSSocket.
+  describe("when the server accepts the connection", () => {
     test("keepAliveTimeout ends a connection that is idle behind a response", async () => {
       const serverSocketClosed = Promise.withResolvers<void>();
       const server = createServer({ keepAliveTimeout: 100, keepAliveTimeoutBuffer: 0 }, (req, res) => {
@@ -1902,7 +1893,7 @@ describe("node:http server timeouts on an HTTP/1.1 connection of an http2 server
     });
 
     // The client never ends its side, so only the server can let go of the connection. Node destroys
-    // the socket behind the response, and a TLSSocket destroys the raw socket under it.
+    // the socket behind the response.
     test.each([
       ["a response to a request that said Connection: close", "Connection: close\r\n"],
       ["the keep-alive timeout", ""],
@@ -1919,11 +1910,6 @@ describe("node:http server timeouts on an HTTP/1.1 connection of an http2 server
         client.socket.write(`GET / HTTP/1.1\r\nHost: x\r\n${extraHeaders}\r\n`);
         await Promise.all([serverSocketClosed.promise, ended]);
         expect(client.received()).toEndWith("\r\n\r\nok");
-        for (const raw of rawSockets) {
-          // The raw socket has sent the response and the TLS close when it emits 'finish'.
-          if (!raw.writableFinished && !raw.destroyed) await new Promise(resolve => raw.once("finish", resolve));
-          expect(raw.destroyed).toBe(true);
-        }
       } finally {
         client.socket.destroy();
         server.close();
@@ -1969,34 +1955,6 @@ describe("node:http server timeouts on an HTTP/1.1 connection of an http2 server
       }
     });
 
-    test("a response to an HTTP/1.0 request ends the connection behind it, and the request is not aborted", async () => {
-      // Without a Content-Length the end of the connection is the end of the body.
-      const events: string[] = [];
-      const serverSocketClosed = Promise.withResolvers<void>();
-      const server = createServer({}, (req, res) => {
-        req.on("aborted", () => events.push("req aborted"));
-        req.on("error", (err: NodeJS.ErrnoException) => events.push(`req error ${err.code}`));
-        req.on("close", () => events.push("req close"));
-        res.on("finish", () => events.push("res finish"));
-        res.on("close", () => events.push("res close"));
-        req.socket.once("close", () => serverSocketClosed.resolve());
-        res.end("hello");
-      });
-      const port = await listenOn(server);
-      const client = await openHttp1Connection(port);
-      try {
-        client.socket.write("GET / HTTP/1.0\r\n\r\n");
-        await Promise.all([serverSocketClosed.promise, client.closed]);
-        expect({ body: client.received().split("\r\n\r\n")[1], events }).toEqual({
-          body: "hello",
-          events: ["res finish", "res close", "req close"],
-        });
-      } finally {
-        client.socket.destroy();
-        server.close();
-      }
-    });
-
     test("a timeout that destroys the socket inside a request is no second 'clientError'", async () => {
       const server = createServer({ headersTimeout: 50, requestTimeout: 50, connectionsCheckingInterval: 10 });
       const reports: string[] = [];
@@ -2026,8 +1984,58 @@ describe("node:http server timeouts on an HTTP/1.1 connection of an http2 server
     });
   });
 
-  test("what a listener throws on a connection that came as a raw socket is an uncaught exception, as in Node", async () => {
-    // A string as server.timeout makes the connection listener throw. The second throw is from a 'clientError' listener.
+  // Without a Content-Length the end of the connection is the end of the body.
+  test.each(Object.keys(entries) as (keyof typeof entries)[])(
+    "a response to an HTTP/1.0 request ends the connection behind it, and the request is not aborted, when %s",
+    async entry => {
+      const events: string[] = [];
+      const serverSocketClosed = Promise.withResolvers<void>();
+      const server = createServer({}, (req, res) => {
+        req.on("aborted", () => events.push("req aborted"));
+        req.on("error", (err: NodeJS.ErrnoException) => events.push(`req error ${err.code}`));
+        req.on("close", () => events.push("req close"));
+        res.on("finish", () => events.push("res finish"));
+        res.on("close", () => events.push("res close"));
+        req.socket.once("close", () => serverSocketClosed.resolve());
+        res.end("hello");
+      });
+      const port = await entries[entry](server);
+      const client = await openHttp1Connection(port);
+      try {
+        client.socket.write("GET / HTTP/1.0\r\n\r\n");
+        await Promise.all([serverSocketClosed.promise, client.closed]);
+        expect({ body: client.received().split("\r\n\r\n")[1], events }).toEqual({
+          body: "hello",
+          events: ["res finish", "res close", "req close"],
+        });
+      } finally {
+        client.socket.destroy();
+        server.close();
+      }
+    },
+  );
+
+  // The stand-in for the TLS socket of a raw connection completes a write before the raw socket has sent
+  // it (#43877). An idle timer on it would end a connection whose response is still on its way, so it has
+  // no setTimeout() yet, and the server arms no socket timer there. The sweep below does not need one.
+  test.todo("keepAliveTimeout ends a connection that came as a raw socket and is idle behind a response", async () => {
+    const serverSocketClosed = Promise.withResolvers<void>();
+    const server = createServer({ keepAliveTimeout: 100, keepAliveTimeoutBuffer: 0 }, (req, res) => {
+      req.socket.once("close", () => serverSocketClosed.resolve());
+      res.end("ok");
+    });
+    const port = await listenBehindFront(server);
+    try {
+      const client = await openHttp1Connection(port);
+      await client.request("/");
+      await serverSocketClosed.promise;
+      await client.closed;
+    } finally {
+      server.close();
+    }
+  });
+
+  test("what a 'clientError' listener throws on a connection that came as a raw socket is an uncaught exception, as in Node", async () => {
     await using proc = Bun.spawn({
       cmd: [bunExe(), path.join(import.meta.dir, "node-http2-allowhttp1-raw-socket-throw-fixture.js")],
       env: bunEnv,
@@ -2037,13 +2045,10 @@ describe("node:http server timeouts on an HTTP/1.1 connection of an http2 server
     const [stdout, stderr, exitCode] = await Promise.all([proc.stdout.text(), proc.stderr.text(), proc.exited]);
     expect({ stdout: stdout.trim(), stderr }).toEqual({
       stdout: JSON.stringify({
-        badTimeout: { outcome: "uncaught exception", uncaught: ["ERR_INVALID_ARG_TYPE"] },
-        throwingListener: {
-          outcome: "uncaught exception",
-          uncaught: ["listener threw on HPE_INVALID_METHOD"],
-          listenerCalls: 1,
-          socketDestroyed: false,
-        },
+        outcome: "uncaught exception",
+        uncaught: ["listener threw on HPE_INVALID_METHOD"],
+        listenerCalls: 1,
+        socketDestroyed: false,
       }),
       stderr: "",
     });
