@@ -756,6 +756,8 @@ describe("a macro import that is used outside of a call", () => {
     "namespace-member-of-member.ts": [`${star} console.log(ns.m.call(null));`, notDefined("ns")],
     // A bundle counts a property of an import apart from the import.
     "property.ts": [`${named} console.log(m.name, m.call(null));`, notDefined("m"), notDefined("m")],
+    // The linker used to panic on the property once the call beside it had removed the count of the import.
+    "property-beside-call.ts": [`${named} console.log(m.name, m());`, notDefined("m")],
     "two-imports.ts": [`${named} ${star} console.log(m, ns);`, notDefined("m"), notDefined("ns")],
     // Where the minifier inlines `f`, the call it leaves is not one that the macro replaced.
     "function-alias.ts": [`${named} function g() { const f = m; return f("x"); } console.log(g());`, notDefined("m")],
