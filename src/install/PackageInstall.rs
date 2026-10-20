@@ -1369,16 +1369,10 @@ impl<'a> PackageInstall<'a> {
         let Ok(node_modules) = Dir::open(&self.node_modules.path) else {
             return false;
         };
-        // A link in the package's place isn't the copy, even one that leads to another copy of the
-        // folder.
-        let dest = node_modules.open_dir(
-            self.destination_dir_subpath.as_bytes(),
-            sys::OpenDirOptions {
-                iterate: true,
-                no_follow: true,
-            },
-        );
-        let (Ok(dest), Ok(src)) = (dest, open_dir(self.cache_dir, self.cache_dir_subpath)) else {
+        let (Ok(dest), Ok(src)) = (
+            open_dir(node_modules.fd(), self.destination_dir_subpath),
+            open_dir(self.cache_dir, self.cache_dir_subpath),
+        ) else {
             return false;
         };
         is_linked_folder(&src, &dest)

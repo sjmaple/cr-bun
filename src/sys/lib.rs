@@ -1936,16 +1936,7 @@ mod posix_impl {
         }
     }
     #[cfg(any(target_os = "linux", target_os = "android"))]
-    fn openat2_disabled() -> bool {
-        bun_core::env_var::feature_flag::BUN_FEATURE_FLAG_DISABLE_OPENAT2
-            .get()
-            .unwrap_or(false)
-    }
-    #[cfg(any(target_os = "linux", target_os = "android"))]
     pub fn openat2_beneath(dir: impl AsFd, path: &ZStr, flags: i32, mode: Mode) -> Maybe<Fd> {
-        if openat2_disabled() {
-            return Err(Error::from_code_int(libc::ENOSYS, Tag::open).with_path(path.as_bytes()));
-        }
         let dir = dir.as_fd();
         let flags = flags | O::CLOEXEC;
         super::linux_syscall::openat2_beneath(dir, path, flags, mode)
@@ -1961,7 +1952,7 @@ mod posix_impl {
 
         let dir = dir.as_fd();
         let flags = flags | O::CLOEXEC;
-        if !UNAVAILABLE.load(Ordering::Relaxed) && !openat2_disabled() {
+        if !UNAVAILABLE.load(Ordering::Relaxed) {
             match super::linux_syscall::openat2_in_root(dir, path, flags, mode) {
                 Ok(fd) => return Ok(fd),
                 Err(e @ (libc::ENOSYS | libc::EPERM | libc::EINVAL | libc::E2BIG)) => {
@@ -2004,7 +1995,7 @@ mod posix_impl {
             use core::sync::atomic::{AtomicBool, Ordering};
             static UNAVAILABLE: AtomicBool = AtomicBool::new(false);
 
-            if UNAVAILABLE.load(Ordering::Relaxed) || openat2_disabled() {
+            if UNAVAILABLE.load(Ordering::Relaxed) {
                 return None;
             }
             let dir = dir.as_fd();
@@ -4166,10 +4157,10 @@ mod windows_impl {
         // CRT-fd-backed `Fd` and ignores the directory/nofollow flags.
         super::openat_windows_a(dir, path.as_bytes(), flags, mode)
     }
-    /// `openat` without `O_NOFOLLOW` that says ELOOP for a junction or a symlink anywhere in
-    /// `path`. The kernel resolves `path` from `dir`, so it has to be relative, with no `.` or
-    /// `..` name. With `O::DIRECTORY`, `O::CREAT` makes the directory, which the POSIX opens
-    /// don't. On a volume for which `is_remote_device` is true, a junction doesn't fail the open.
+    /// `openat` of a file without `O_NOFOLLOW` that says ELOOP for a junction or a symlink
+    /// anywhere in `path`. The kernel resolves `path` from `dir`, so it has to be relative, with
+    /// no `.` or `..` name. On a volume for which `is_remote_device` is true, a junction doesn't
+    /// fail the open.
     pub fn openat_no_symlinks(
         dir: impl AsFd,
         path: &ZStr,
@@ -6501,8 +6492,6 @@ pub struct WindowsOpenDirOptions {
     pub no_follow: bool,
     pub can_rename_or_delete: bool,
     pub op: WindowsOpenDirOp,
-    /// `OBJECT_ATTRIBUTES.Attributes`.
-    pub object_attributes: u32,
 }
 #[cfg(windows)]
 #[derive(Clone, Copy, Default, PartialEq, Eq)]
@@ -7010,7 +6999,7 @@ pub(crate) fn open_dir_at_windows_nt_path(
         } else {
             Fd::cwd().native()
         },
-        Attributes: options.object_attributes, // Note we do not use OBJ_CASE_INSENSITIVE here.
+        Attributes: 0, // Note we do not use OBJ_CASE_INSENSITIVE here.
         ObjectName: &mut nt_name,
         SecurityDescriptor: core::ptr::null_mut(),
         SecurityQualityOfService: core::ptr::null_mut(),
@@ -7339,7 +7328,7 @@ fn nt_name_below<'a>(path: &[u16], buf: &'a mut [u16]) -> Maybe<&'a bun_core::WS
     Ok(bun_core::WStr::from_buf(&buf[..], len))
 }
 
-/// `openat_windows` below `dir`. A directory opens with `O::DIRECTORY`, and `O::CREAT` makes it.
+/// `openat_windows` of a file below `dir`.
 #[cfg(windows)]
 pub fn openat_windows_below(
     dir: Fd,
@@ -7348,25 +7337,9 @@ pub fn openat_windows_below(
     perm: Mode,
     object_attributes: u32,
 ) -> Maybe<Fd> {
+    debug_assert!((flags & O::DIRECTORY) == 0);
     let mut buf = bun_paths::w_path_buffer_pool::get();
     let name = nt_name_below(path, &mut buf.0[..])?;
-    if (flags & O::DIRECTORY) != 0 {
-        return open_dir_at_windows_nt_path(
-            dir,
-            name,
-            WindowsOpenDirOptions {
-                iterable: (flags & O::PATH) == 0,
-                no_follow: (flags & O::NOFOLLOW) != 0,
-                op: if (flags & O::CREAT) != 0 {
-                    WindowsOpenDirOp::OpenOrCreate
-                } else {
-                    WindowsOpenDirOp::OnlyOpen
-                },
-                object_attributes,
-                ..Default::default()
-            },
-        );
-    }
     let mut options = nt_file_options(flags, perm);
     options.object_attributes = object_attributes;
     open_file_at_windows_nt_path(dir, name, options)

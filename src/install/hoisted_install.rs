@@ -413,7 +413,7 @@ pub(crate) fn install_hoisted_packages(
                 root_node_modules_folder: node_modules_folder,
                 staging_lock: None,
                 tree_dir: None,
-                base_dir: Default::default(),
+                saw_link: Default::default(),
                 #[cfg(windows)]
                 sees_junctions: Default::default(),
                 // Disabled on Windows, where the hardlink backend has its own queue. A batch keeps
@@ -452,10 +452,8 @@ pub(crate) fn install_hoisted_packages(
                             inside_replaced_folder: false,
                             outlived_root: false,
                             anchor: Default::default(),
-                            opens_base: Default::default(),
+                            follows_links: Default::default(),
                             behind_link: Default::default(),
-                            has_link: Default::default(),
-                            real_scope: Default::default(),
                             link_reported: Default::default(),
                         });
                     }
