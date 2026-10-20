@@ -630,6 +630,8 @@ describe("--no-macros", () => {
 // reference would name a binding that the output does not declare, so it is an error wherever the file is transpiled.
 describe("a macro import that is used outside of a call", () => {
   const notDefined = (name: string) => `"${name}" is a macro import and is not defined at runtime`;
+  // Where no identifier is left to point at: the error is at the import.
+  const notDefinedInFile = (name: string) => `${notDefined(name)}, but this file uses it outside of a call`;
   const removed = (name: string) => `Bun removes this macro import of "${name}" from "./m.ts"`;
   const remedy = (name: string, how = "add a regular import of it") =>
     `Bun replaces each call of a macro with its result. To inline a value, call a macro that returns it. To use "${name}" at runtime, ${how}.`;
@@ -644,154 +646,270 @@ describe("a macro import that is used outside of a call", () => {
   const named = `import { m } from "./m.ts" with { type: "macro" };`;
   const star = `import * as ns from "./m.ts" with { type: "macro" };`;
 
-  // [source, ...the binding that each error names, in source order]
-  const refused: Record<string, [source: string, ...names: string[]]> = {
-    "alias.ts": [`${named} const f = m; console.log(f("x"));`, "m"],
-    "function-alias.ts": [`${named} function g() { const f = m; return f("x"); } console.log(g());`, "m"],
-    "argument.ts": [`${named} console.log([1].map(m));`, "m"],
-    "shorthand.ts": [`${named} console.log({ m });`, "m"],
-    "property.ts": [`${named} console.log(m.name);`, "m"],
-    "method-call.ts": [`${named} console.log(m.call(null));`, "m"],
-    "new.ts": [`${named} console.log(new m());`, "m"],
-    "typeof.ts": [`${named} console.log(typeof m);`, "m"],
-    "typeof-guard.ts": [`${named} console.log(typeof m === "function" ? "fn" : m());`, "m"],
-    "assignment.ts": [`${named} m = 1;`, "m"],
-    "export-clause.ts": [`${named} export { m };`, "m"],
-    "export-default.ts": [`${named} export default m;`, "m"],
-    "uncalled-function.ts": [`${named} function uncalled() { return m; } console.log("loaded");`, "m"],
-    "import-equals.ts": [`${named} import f = m; console.log(f);`, "m"],
-    "two-uses.ts": [`${named} const f = m; const g = m; console.log(f, g);`, "m", "m"],
-    "constant.ts": [`import { K } from "./m.ts" with { type: "macro" }; console.log(K);`, "K"],
-    "default.ts": [`import d from "./m.ts" with { type: "macro" }; console.log(d);`, "d"],
-    "renamed.ts": [`import { m as renamed } from "./m.ts" with { type: "macro" }; console.log(renamed);`, "renamed"],
-    "assert.ts": [`import { m } from "./m.ts" assert { type: "macro" }; console.log(m);`, "m"],
-    "namespace.ts": [`${star} console.log(Object.keys(ns));`, "ns"],
-    "namespace-member.ts": [`${star} const f = ns.m; console.log(f());`, "ns"],
-    "namespace-member-of-member.ts": [`${star} console.log(ns.m.call(null));`, "ns"],
-    // A replaced call, live or dead, does not hide a use in another place.
-    "use-before-call.ts": [`${named} console.log(m); console.log(m());`, "m"],
-    "use-after-call.ts": [`${named} console.log(m()); console.log(m);`, "m"],
-    "use-beside-call.ts": [`${named} console.log(m(), m);`, "m"],
-    "use-after-dead-call.ts": [`${named} if (false) { console.log(m()); } console.log(m);`, "m"],
+  // Each of these names the macro import `USE` once, on the line after the import. The error is at that identifier.
+  const importOfUse = `import { m as USE } from "./m.ts" with { type: "macro" };\n`;
+  const uses: Record<string, string> = {
+    "alias.ts": `const f = USE;`,
+    "call-argument.ts": `console.log(USE);`,
+    "new-argument.ts": `new Set(USE);`,
+    "new-target.ts": `new USE();`,
+    "member.ts": `console.log(USE.name);`,
+    "index.ts": `console.log(USE["name"]);`,
+    "index-key.ts": `console.log([1][USE]);`,
+    "optional-member.ts": `console.log(USE?.name);`,
+    "method-call.ts": `USE.call(null);`,
+    "call-of-call.ts": `console.log(USE.bind(null)()());`,
+    "unary.ts": `console.log(!USE);`,
+    "typeof.ts": `console.log(typeof USE);`,
+    "binary-left.ts": `console.log(USE + 1);`,
+    "binary-right.ts": `console.log(1 + USE);`,
+    "logical.ts": `console.log(globalThis.x || USE);`,
+    "comma.ts": `console.log((1, USE));`,
+    "conditional-test.ts": `console.log(USE ? 1 : 2);`,
+    "conditional-chain.ts": `console.log(globalThis.a ? 1 : globalThis.b ? 2 : USE);`,
+    "assignment-target.ts": `USE = 1;`,
+    "assignment-value.ts": `let x; x = USE;`,
+    "update.ts": `USE++;`,
+    "expression-statement.ts": `USE;`,
+    "array.ts": `console.log([1, USE]);`,
+    "spread.ts": `console.log([...USE]);`,
+    "object-value.ts": `console.log({ a: USE });`,
+    "object-shorthand.ts": `console.log({ USE });`,
+    "object-computed-key.ts": `console.log({ [USE]: 1 });`,
+    "object-spread.ts": `console.log({ ...USE });`,
+    "object-method.ts": `console.log({ f() { return USE; } });`,
+    "object-getter.ts": `console.log({ get f() { return USE; } });`,
+    "template.ts": "console.log(`a${USE}b`);",
+    "tagged-template.ts": "console.log(String.raw`a${USE}b`);",
+    "satisfies.ts": `console.log(USE satisfies unknown);`,
+    "non-null.ts": `console.log(USE!);`,
+    "dynamic-import.ts": `import(USE);`,
+    "arrow-body.ts": `export const f = () => USE;`,
+    "arrow-block.ts": `export const f = () => { return USE; };`,
+    "arrow-default.ts": `export const f = (a = USE) => a;`,
+    "function-body.ts": `export function f() { return USE; }`,
+    "function-default.ts": `export function f(a = USE) { return a; }`,
+    "function-expression.ts": `export const f = function () { return USE; };`,
+    "async.ts": `export async function f() { return await USE; }`,
+    "generator.ts": `export function* f() { yield USE; }`,
+    "destructuring-default.ts": `export const { a = USE } = {} as any;`,
+    "array-destructuring-default.ts": `export const [a = USE] = [] as any;`,
+    "destructuring-computed-key.ts": `export const { [USE]: a } = {} as any;`,
+    "parameter-destructuring-default.ts": `export function f({ a = USE } = {} as any) { return a; }`,
+    "class-extends.ts": `export class A extends USE {}`,
+    "class-field.ts": `export class A { x = USE; }`,
+    "class-static-field.ts": `export class A { static x = USE; }`,
+    "class-private-field.ts": `export class A { #x = USE; get x() { return this.#x; } }`,
+    "class-method.ts": `export class A { f() { return USE; } }`,
+    "class-computed-key.ts": `export class A { [USE]() {} }`,
+    "class-static-block.ts": `export class A { static { console.log(USE); } }`,
+    "class-expression.ts": `export const A = class { x = USE; };`,
+    "class-parameter-property.ts": `export class A { constructor(public x = USE) {} }`,
+    "class-decorator.ts": `function dec(...a: any[]) { return (..._: any[]) => {}; } @dec(USE) class A {} console.log(A);`,
+    "member-decorator.ts": `function dec(...a: any[]) { return (..._: any[]) => {}; } class A { @dec(USE) x = 1; } console.log(A);`,
+    "if-test.ts": `if (USE) console.log(1);`,
+    "else-if.ts": `if (globalThis.a) {} else if (globalThis.b) {} else if (USE) console.log(1);`,
+    "if-body.ts": `if (globalThis.a) { console.log(USE); }`,
+    "for-init.ts": `for (let i = USE; i < 1; i++) {}`,
+    "for-test.ts": `for (let i = 0; i < USE; i++) {}`,
+    "for-update.ts": `for (let i = 0; i < 1; i += USE) {}`,
+    "for-body.ts": `for (let i = 0; i < 1; i++) { console.log(USE); }`,
+    "for-in.ts": `for (const k in USE) {}`,
+    "for-of.ts": `for (const k of USE) {}`,
+    "for-of-target.ts": `for (USE of []) {}`,
+    "while.ts": `while (USE) {}`,
+    "do-while.ts": `do {} while (USE);`,
+    "switch-test.ts": `switch (USE) {}`,
+    "switch-case.ts": `switch (globalThis.a) { case USE: break; }`,
+    "switch-body.ts": `switch (globalThis.a) { default: console.log(USE); }`,
+    "try.ts": `try { console.log(USE); } catch {}`,
+    "catch.ts": `try {} catch { console.log(USE); }`,
+    "finally.ts": `try {} finally { console.log(USE); }`,
+    "throw.ts": `throw USE;`,
+    "label.ts": `a: { console.log(USE); }`,
+    "block.ts": `{ console.log(USE); }`,
+    "return.ts": `export function f() { if (globalThis.a) return USE; }`,
+    "export-clause.ts": `export { USE };`,
+    "export-clause-renamed.ts": `export { USE as other };`,
+    "export-default.ts": `export default USE;`,
+    "export-default-expression.ts": `export default [USE];`,
+    "export-const.ts": `export const f = USE;`,
+    "import-equals.ts": `import f = USE; console.log(f);`,
+    "enum.ts": `enum E { A = USE as any } console.log(E.A);`,
+    "namespace-block.ts": `namespace N { export const v = USE; } console.log(N.v);`,
+    // As deep to the left as it is long.
+    "long-chain.ts": `export const sum = USE${Buffer.alloc(2 * 20_000, "+x").toString()}; var x = 1;`,
   };
 
-  // Each of these prints one line, and keeps doing so.
-  const accepted: Record<string, [source: string, stdout: string]> = {
-    "call.ts": [`${named} console.log("call", m());`, "call 42"],
-    "optional-call.ts": [`${named} console.log("optional-call", m?.());`, "optional-call 42"],
-    "parenthesized-call.ts": [`${named} console.log("parenthesized-call", (m)());`, "parenthesized-call 42"],
-    "type-assertions.ts": [
-      `${named} console.log("type-assertions", (m as any)(), m!(), (<any>m)(), (m satisfies unknown)());`,
+  // Every spelling of the import, and a reference beside a call. [source, ...the message of each error]
+  const refused: Record<string, [source: string, ...errors: string[]]> = {
+    "constant.ts": [`import { K } from "./m.ts" with { type: "macro" }; console.log(K);`, notDefined("K")],
+    "default.ts": [`import d from "./m.ts" with { type: "macro" }; console.log(d);`, notDefined("d")],
+    "renamed.ts": [
+      `import { m as renamed } from "./m.ts" with { type: "macro" }; console.log(renamed);`,
+      notDefined("renamed"),
+    ],
+    "assert.ts": [`import { m } from "./m.ts" assert { type: "macro" }; console.log(m);`, notDefined("m")],
+    "prefix.ts": [`import { m } from "macro:./m.ts"; console.log(m);`, notDefined("m")],
+    "namespace.ts": [`${star} console.log(Object.keys(ns));`, notDefined("ns")],
+    "namespace-member.ts": [`${star} const f = ns.m; console.log(f());`, notDefined("ns")],
+    "namespace-member-of-member.ts": [`${star} console.log(ns.m.call(null));`, notDefined("ns")],
+    // A bundle counts a property of an import apart from the import.
+    "property.ts": [`${named} console.log(m.name, m.call(null));`, notDefined("m"), notDefined("m")],
+    "two-imports.ts": [`${named} ${star} console.log(m, ns);`, notDefined("m"), notDefined("ns")],
+    // Where the minifier inlines `f`, the call it leaves is not one that the macro replaced.
+    "function-alias.ts": [`${named} function g() { const f = m; return f("x"); } console.log(g());`, notDefined("m")],
+    // A bundle does not keep this function, and it is still an error.
+    "uncalled-function.ts": [`${named} function uncalled() { return m; } console.log("loaded");`, notDefined("m")],
+    "typeof-guard.ts": [`${named} console.log(typeof m === "function" ? "fn" : m());`, notDefined("m")],
+    // Dead code that the output keeps can still name a macro import. That alone is not an error.
+    "dead-beside-live.ts": [
+      `import { m, o } from "./m.ts" with { type: "macro" }; if (false) { switch (o) {} } console.log(m);`,
+      notDefined("m"),
+    ],
+    // A replaced call, live or dead, does not hide a use in another place.
+    "beside-calls.ts": [
+      `import fn, { m as renamed } from "./m.ts" with { type: "macro" }; ${star} export function later() { return [renamed(), ns.m()].map(renamed); } if (false) { console.log(fn()); } export { fn }; console.log(typeof ns, fn());`,
+      notDefined("renamed"),
+      notDefined("fn"),
+      notDefined("ns"),
+    ],
+    // The visit pass counts a use before it removes the node that holds it. The count decides.
+    "removed-node.ts": [`${named} export function g() { void m; }`, notDefinedInFile("m")],
+    // The walk that finds the identifier stops at a depth limit. The error does not depend on it.
+    "deep.ts": [
+      `${named} console.log(${Buffer.alloc(600, "[").toString()}m${Buffer.alloc(600, "]").toString()});`,
+      notDefinedInFile("m"),
+    ],
+  };
+
+  // The error follows what the visit pass replaces and removes, and that depends on how the file is transpiled.
+  const folded: Record<string, { source: string; build: string[]; import: string[]; transform: string[] }> = {
+    // A call of `m` once the comma is folded away. The runtime folds it before it looks at the call.
+    "comma-call.ts": {
+      source: `${named} console.log("comma-call", (0, m)());`,
+      build: [notDefined("m")],
+      import: [],
+      transform: [notDefined("m")],
+    },
+    // A statement with no effect is removed, and its use with it where each statement is a part of its own.
+    "void-statement.ts": {
+      source: `${named} void m; console.log("void-statement", m());`,
+      build: [],
+      import: [],
+      transform: [notDefinedInFile("m")],
+    },
+  };
+
+  // Each line of this file prints one line, and keeps doing so.
+  const accepted: [statement: string, stdout: string][] = [
+    [`import d, { m, m as renamed, o } from "./m.ts" with { type: "macro" };`, ""],
+    [`import * as ns from "./m.ts" with { type: "macro" };`, ""],
+    [`import { m as asserted } from "./m.ts" assert { type: "macro" };`, ""],
+    [`import { m as prefixed } from "macro:./m.ts";`, ""],
+    [`import { m as unused } from "./m.ts" with { type: "macro" };`, ""],
+    [`import * as unusedNamespace from "./m.ts" with { type: "macro" };`, ""],
+    [`console.log("call", m());`, "call 42"],
+    [`console.log("optional-call", m?.());`, "optional-call 42"],
+    [`console.log("parenthesized-call", (m)());`, "parenthesized-call 42"],
+    [
+      `console.log("type-assertions", (m as any)(), m!(), (<any>m)(), (m satisfies unknown)());`,
       "type-assertions 42 42 42 42",
     ],
-    "default-call.ts": [
-      `import d, { m as renamed } from "./m.ts" with { type: "macro" }; console.log("default-call", d(), renamed());`,
-      "default-call 7 42",
-    ],
-    "assert-call.ts": [
-      `import { m } from "./m.ts" assert { type: "macro" }; console.log("assert-call", m());`,
-      "assert-call 42",
-    ],
-    "namespace-call.ts": [
-      `${star} console.log("namespace-call", ns.m(), ns?.m(), ns.default());`,
-      "namespace-call 42 42 7",
-    ],
-    "unused.ts": [`${named} ${star} console.log("unused");`, "unused"],
-    "type-only.ts": [
-      `${named} type T = ReturnType<typeof m>; const x: T = 1; let y: typeof m | undefined; console.log("type-only", x, y);`,
+    [`console.log("default-and-renamed", d(), renamed());`, "default-and-renamed 7 42"],
+    [`console.log("assert-and-prefix", asserted(), prefixed());`, "assert-and-prefix 42 42"],
+    [`console.log("namespace", ns.m(), ns?.m(), ns.default());`, "namespace 42 42 7"],
+    [`console.log("use-before-import", late());`, "use-before-import 42"],
+    [
+      `type T = ReturnType<typeof m>; const typed: T = 1; let untyped: typeof m | undefined; console.log("type-only", typed, untyped);`,
       "type-only 1 undefined",
     ],
-    "shadowed.ts": [
-      `${named} const len = (m: string) => m.length; console.log("shadowed", m(), len("abc"));`,
-      "shadowed 42 3",
-    ],
-    "use-before-import.ts": [`console.log("use-before-import", m()); ${named}`, "use-before-import 42"],
+    [`const len = (m: string) => m.length; console.log("shadowed", len("abc"));`, "shadowed 3"],
     // A use in a branch that the visit pass knows is dead is not in the output.
-    "dead-branch.ts": [
-      `${named} if (false) console.log(typeof m, m); console.log("dead-branch", m());`,
-      "dead-branch 42",
-    ],
-    "dead-call.ts": [
-      `${named} if (false) { console.log(m()); } false && m(); console.log("dead-call", m());`,
-      "dead-call 42",
-    ],
-    "nested-calls.ts": [
-      `${named} console.log("nested-calls", m(m()), [m(), m()].length, { a: m() }.a, \`\${m()}\`);`,
-      "nested-calls 42 2 42 42",
-    ],
-    "class-fields.ts": [
-      `${named} class A { x = m(); static y = m(); #z = m(); get z() { return this.#z; } } const a = new A(); console.log("class-fields", a.x, A.y, a.z);`,
+    [`if (false) console.log(typeof m, m, ns); console.log("dead-branch");`, "dead-branch"],
+    [`if (false) { console.log(m()); } false && m(); console.log("dead-call");`, "dead-call"],
+    ['console.log("nested-calls", m(m()), [m(), m()].length, { a: m() }.a, `${m()}`);', "nested-calls 42 2 42 42"],
+    [
+      `class Fields { x = m(); static y = m(); #z = m(); get z() { return this.#z; } } console.log("class-fields", new Fields().x, Fields.y, new Fields().z);`,
       "class-fields 42 42 42",
     ],
-    "default-parameters.ts": [
-      `${named} function f(a = m()) { return a; } const g = (a = m()) => a; console.log("default-parameters", f(), g());`,
+    [
+      `function withDefault(a = m()) { return a; } const arrowWithDefault = (a = m()) => a; console.log("default-parameters", withDefault(), arrowWithDefault());`,
       "default-parameters 42 42",
     ],
-    "result-alias.ts": [
-      `${named} const v = m(); const w = v; console.log("result-alias", v + w);`,
-      "result-alias 84",
-    ],
-    "destructured-result.ts": [
-      `import { o } from "./m.ts" with { type: "macro" }; const { a, b } = o(); const [c] = [o().a]; console.log("destructured-result", a, b, c);`,
+    [`const result = m(); const alias = result; console.log("result-alias", result + alias);`, "result-alias 84"],
+    [
+      `const { a, b } = o(); const [c] = [o().a]; console.log("destructured-result", a, b, c);`,
       "destructured-result 1 2 1",
     ],
-    "enum.ts": [`${named} enum E { A = m(), B = A + 1 } console.log("enum", E.A, E.B);`, "enum 42 43"],
-    "namespace-block.ts": [
-      `${named} namespace N { export const v = m(); } console.log("namespace-block", N.v);`,
-      "namespace-block 42",
-    ],
-    "condition.ts": [
-      `${named} console.log("condition", m() ? "yes" : "no", m() && 1, m() ?? 2);`,
-      "condition yes 1 42",
-    ],
-  };
+    [`enum Enum { A = m(), B = A + 1 } console.log("enum", Enum.A, Enum.B);`, "enum 42 43"],
+    [`namespace Block { export const v = m(); } console.log("namespace-block", Block.v);`, "namespace-block 42"],
+    [`console.log("condition", m() ? "yes" : "no", m() && 1, m() ?? 2);`, "condition yes 1 42"],
+    [`import { m as late } from "./m.ts" with { type: "macro" };`, ""],
+  ];
+  const acceptedStdout = accepted.map(([, stdout]) => stdout).filter(line => line !== "");
 
-  const sourcesOf = (rows: Record<string, readonly [source: string, ...rest: string[]]>) =>
-    Object.fromEntries(Object.entries(rows).map(([file, [source]]) => [file, source + "\n"]));
-  const refusedErrors = Object.fromEntries(
-    Object.entries(refused).map(([file, [, ...names]]) => [file, names.map(notDefined)]),
-  );
-  const acceptedStdout = Object.values(accepted).map(([, stdout]) => stdout);
+  // An error as [message, line, column, ...notes], and a note as [message, line, column].
+  const errorsOf = `
+    const at = (position: any) => [position?.line ?? null, position?.column ?? null];
+    const errorsOf = (errors: any[]) =>
+      errors.map(error => [
+        error.message,
+        ...at(error.position),
+        ...error.notes.map((note: any) => [note.message, ...at(note.position)]),
+      ]);
+  `;
+  const inDirectory = (directory: string, sources: [file: string, source: string][]) =>
+    Object.fromEntries([
+      [`${directory}/m.ts`, macroFile],
+      ...sources.map(([file, source]) => [`${directory}/${file}`, source + "\n"]),
+    ]);
   const files = {
     "m.ts": macroFile,
-    ...sourcesOf(refused),
-    ...sourcesOf(accepted),
-    "accepted.ts": Object.keys(accepted)
-      .map(file => `import "./${file}";`)
-      .join("\n"),
-    // Each prints, as its last line, what every file named on the command line did.
-    "build.ts": `
+    // The decorators in `uses` are TypeScript's. Bun.Transpiler reads no tsconfig.json and lowers them as standard ones.
+    "tsconfig.json": JSON.stringify({ compilerOptions: { experimentalDecorators: true } }),
+    ...inDirectory(
+      "uses",
+      Object.entries(uses).map(([file, source]) => [file, importOfUse + source]),
+    ),
+    ...inDirectory(
+      "refused",
+      Object.entries(refused).map(([file, [source]]) => [file, source]),
+    ),
+    ...inDirectory("accepted", [["accepted.ts", accepted.map(([statement]) => statement).join("\n")]]),
+    ...inDirectory(
+      "folded",
+      Object.entries(folded).map(([file, { source }]) => [file, source]),
+    ),
+    // Prints, as its last line, the errors of each file in each directory.
+    "errors.ts": `
+      import { readdirSync } from "node:fs";
       import { basename } from "node:path";
-      const files = process.argv.slice(2);
-      const build = await Bun.build({ entrypoints: files.map(file => "./" + file), target: "bun", throw: false });
-      const errors: Record<string, string[]> = Object.fromEntries(files.map(file => [file, []]));
-      for (const log of build.logs) errors[basename(log.position?.file ?? "")]?.push(log.message);
-      console.log(JSON.stringify(errors));
-    `,
-    "import.ts": `
-      const errors: Record<string, string[]> = {};
-      for (const file of process.argv.slice(2)) {
-        try {
-          await import("./" + file);
-          errors[file] = [];
-        } catch (e: any) {
-          errors[file] = (e?.errors ?? [e]).map((error: any) => error.message);
-        }
-      }
-      console.log(JSON.stringify(errors));
-    `,
-    "transform.ts": `
+      ${errorsOf}
+      const [how, ...directories] = process.argv.slice(2);
       const transpiler = new Bun.Transpiler({ loader: "ts" });
-      const errors: Record<string, string[]> = {};
-      for (const file of process.argv.slice(2)) {
-        try {
-          transpiler.transformSync(await Bun.file(file).text());
-          errors[file] = [];
-        } catch (e: any) {
-          errors[file] = (e?.errors ?? [e]).map((error: any) => error.message);
+      const all: Record<string, Record<string, unknown[]>> = {};
+      for (const directory of directories) {
+        const files = readdirSync(directory).filter(file => file !== "m.ts");
+        const errors: Record<string, unknown[]> = Object.fromEntries(files.map(file => [file, []]));
+        if (how === "build") {
+          const entrypoints = files.map(file => "./" + directory + "/" + file);
+          const build = await Bun.build({ entrypoints, target: "bun", throw: false });
+          for (const log of build.logs) errors[basename(log.position?.file ?? "")]?.push(...errorsOf([log]));
+        } else {
+          for (const file of files) {
+            const path = "./" + directory + "/" + file;
+            try {
+              if (how === "import") await import(path);
+              else transpiler.transformSync(await Bun.file(path).text());
+            } catch (e: any) {
+              errors[file] = errorsOf(e?.errors ?? [e]);
+            }
+          }
         }
+        all[directory] = errors;
       }
-      console.log(JSON.stringify(errors));
+      console.log(JSON.stringify(all));
     `,
   };
 
@@ -806,202 +924,54 @@ describe("a macro import that is used outside of a call", () => {
     return { lines, stderr, exitCode };
   }
 
-  describe.each(["build.ts", "import.ts", "transform.ts"])("through %s", script => {
-    test.concurrent("each reference that is not a call is an error", async () => {
-      using dir = tempDir("macro-value-use", files);
-      const { lines, stderr, exitCode } = await run(String(dir), script, ...Object.keys(refused));
-      expect({ errors: JSON.parse(lines.at(-1)!), stderr }).toEqual({ errors: refusedErrors, stderr: "" });
-      expect(exitCode).toBe(0);
-    });
+  const usesErrors = Object.fromEntries(
+    Object.entries(uses).map(([file, source]) => [
+      file,
+      [[notDefined("USE"), 2, source.indexOf("USE") + 1, [removed("USE"), 1, 10], [remedy("USE"), null, null]]],
+    ]),
+  );
+  const refusedErrors = Object.fromEntries(Object.entries(refused).map(([file, [, ...errors]]) => [file, errors]));
+  const messagesOf = (errors: Record<string, [message: string][]>) =>
+    Object.fromEntries(Object.entries(errors).map(([file, errors]) => [file, errors.map(([message]) => message)]));
 
-    test.concurrent("a call, an unused import and a use in dead code are not", async () => {
-      using dir = tempDir("macro-value-use", files);
-      const { lines, stderr, exitCode } = await run(String(dir), script, ...Object.keys(accepted));
-      expect({ errors: JSON.parse(lines.at(-1)!), printed: lines.slice(0, -1), stderr }).toEqual({
-        errors: Object.fromEntries(Object.keys(accepted).map(file => [file, []])),
-        // Only the import runs the files.
-        printed: script === "import.ts" ? acceptedStdout : [],
-        stderr: "",
-      });
-      expect(exitCode).toBe(0);
+  // Bun.build(), the runtime and Bun.Transpiler each transpile with their own options.
+  const ways = ["build", "import", "transform"];
+
+  // Each of these six transpiles a directory of files, so they run one at a time.
+  test.each(ways)("%s: each kind of reference is an error at its identifier", async how => {
+    using dir = tempDir("macro-value-use", files);
+    const { lines, stderr, exitCode } = await run(String(dir), "errors.ts", how, "uses");
+    expect({ errors: JSON.parse(lines.at(-1)!).uses, stderr }).toEqual({ errors: usesErrors, stderr: "" });
+    expect(exitCode).toBe(0);
+  });
+
+  test.each(ways)("%s: each spelling of the import is an error, and a call is not", async how => {
+    using dir = tempDir("macro-value-use", files);
+    const { lines, stderr, exitCode } = await run(String(dir), "errors.ts", how, "refused", "accepted", "folded");
+    const errors = JSON.parse(lines.at(-1)!);
+    expect({
+      refused: messagesOf(errors.refused),
+      accepted: errors.accepted,
+      folded: messagesOf(errors.folded),
+      printed: lines.slice(0, -1),
+      stderr,
+    }).toEqual({
+      refused: refusedErrors,
+      accepted: { "accepted.ts": [] },
+      folded: Object.fromEntries(Object.entries(folded).map(([file, verdicts]) => [file, verdicts[how]])),
+      // Only the import runs the files that have no error.
+      printed: how === "import" ? [...acceptedStdout, "comma-call 42", "void-statement 42"] : [],
+      stderr: "",
     });
+    expect(exitCode).toBe(0);
   });
 
   test.concurrent("a bundle of the accepted forms runs", async () => {
     using dir = tempDir("macro-value-use", files);
-    const build = await run(String(dir), "build", "./accepted.ts", "--target=bun", "--outdir", "out");
+    const build = await run(String(dir), "build", "./accepted/accepted.ts", "--target=bun", "--outdir", "out");
     expect({ stderr: build.stderr, exitCode: build.exitCode }).toEqual({ stderr: "", exitCode: 0 });
     const { lines, stderr, exitCode } = await run(String(dir), "out/accepted.js");
     expect({ lines, stderr }).toEqual({ lines: acceptedStdout, stderr: "" });
-    expect(exitCode).toBe(0);
-  });
-
-  // The error follows what the visit pass replaces. `(0, m)()` is a call of `m` once the comma is folded away, which
-  // the runtime and --minify-syntax do before they look at the call.
-  test.concurrent("a call that only some modes fold is an error where it is not folded", async () => {
-    using dir = tempDir("macro-value-use", {
-      "m.ts": macroFile,
-      "comma-call.ts": `${named} console.log("comma-call", (0, m)());\n`,
-    });
-    const plain = await run(String(dir), "build", "./comma-call.ts", "--target=bun");
-    expect(plain.stderr).toContain(notDefined("m"));
-    expect(plain.exitCode).toBe(1);
-    const minified = await run(String(dir), "build", "./comma-call.ts", "--target=bun", "--minify-syntax");
-    expect({ lines: minified.lines.filter(line => line.includes("comma-call")), stderr: minified.stderr }).toEqual({
-      lines: [`console.log("comma-call", 42);`],
-      stderr: "",
-    });
-    expect(minified.exitCode).toBe(0);
-    const ran = await run(String(dir), "comma-call.ts");
-    expect({ lines: ran.lines, stderr: ran.stderr }).toEqual({ lines: ["comma-call 42"], stderr: "" });
-    expect(ran.exitCode).toBe(0);
-  });
-
-  const detail = `
-    const detail = (e: any) =>
-      (e?.errors ?? [e]).map((error: any) => ({
-        message: error.message,
-        at: [error.position?.line, error.position?.column],
-        notes: error.notes.map((note: any) => [note.message, note.position?.line ?? null, note.position?.column ?? null]),
-      }));
-  `;
-
-  test.concurrent("the error is at the identifier, with a note at the import and a note that names the remedies", async () => {
-    using dir = tempDir("macro-value-use", {
-      "m.ts": macroFile,
-      "where.ts": [
-        `import fn, { m as renamed } from "./m.ts" with { type: "macro" };`,
-        `import * as ns from "./m.ts" with { type: "macro" };`,
-        `export function later() {`,
-        `  return [renamed(), ns.m()].map(renamed);`,
-        `}`,
-        `export { fn };`,
-        `console.log(typeof ns, fn());`,
-        ``,
-      ].join("\n"),
-      "build.ts": `
-        ${detail}
-        const build = await Bun.build({ entrypoints: ["./where.ts"], target: "bun", throw: false });
-        console.log(JSON.stringify(detail({ errors: build.logs })));
-      `,
-      "import.ts": `
-        ${detail}
-        try {
-          await import("./where.ts");
-        } catch (e) {
-          console.log(JSON.stringify(detail(e)));
-        }
-      `,
-    });
-    const expected = [
-      {
-        message: notDefined("renamed"),
-        at: [4, 34],
-        notes: [
-          [removed("renamed"), 1, 14],
-          [remedy("renamed"), null, null],
-        ],
-      },
-      {
-        message: notDefined("fn"),
-        at: [6, 10],
-        notes: [
-          [removed("fn"), 1, 8],
-          [remedy("fn"), null, null],
-        ],
-      },
-      {
-        message: notDefined("ns"),
-        at: [7, 20],
-        notes: [
-          [removed("ns"), 2, 13],
-          [remedy("ns"), null, null],
-        ],
-      },
-    ];
-    for (const script of ["build.ts", "import.ts"]) {
-      const { lines, stderr, exitCode } = await run(String(dir), script);
-      expect({ script, errors: JSON.parse(lines.at(-1)!), stderr }).toEqual({ script, errors: expected, stderr: "" });
-      expect(exitCode).toBe(0);
-    }
-  });
-
-  // The visit pass counts a use before it removes the node that holds it. The count is what decides, so the error
-  // stays, at the import.
-  test.concurrent("a use whose node the visit pass removed is an error at the import", async () => {
-    using dir = tempDir("macro-value-use", {
-      "m.ts": macroFile,
-      "void-in-function.ts": `${named}\nexport function g() {\n  void m;\n}\n`,
-      "import.ts": `
-        ${detail}
-        try {
-          await import("./void-in-function.ts");
-        } catch (e) {
-          console.log(JSON.stringify(detail(e)));
-        }
-      `,
-    });
-    const { lines, stderr, exitCode } = await run(String(dir), "import.ts");
-    expect({ errors: JSON.parse(lines.at(-1)!), stderr }).toEqual({
-      errors: [
-        {
-          message: `${notDefined("m")}, but this file uses it outside of a call`,
-          at: [1, 10],
-          notes: [[remedy("m"), null, null]],
-        },
-      ],
-      stderr: "",
-    });
-    expect(exitCode).toBe(0);
-  });
-
-  // A statement that is only a reference has no effect, so the visit pass removes it with its use. Where each
-  // statement is a part of its own, nothing of it is left to report.
-  test.concurrent("a statement that the visit pass removes with its use is not an error", async () => {
-    using dir = tempDir("macro-value-use", {
-      "m.ts": macroFile,
-      "void.ts": `${named}\nvoid m;\nm;\nconsole.log("void", m());\n`,
-    });
-    const { lines, stderr, exitCode } = await run(String(dir), "void.ts");
-    expect({ lines, stderr }).toEqual({ lines: ["void 42"], stderr: "" });
-    expect(exitCode).toBe(0);
-    const built = await run(String(dir), "build", "./void.ts", "--target=bun");
-    expect({ lines: built.lines.filter(line => line.includes("void")), stderr: built.stderr }).toEqual({
-      lines: [`console.log("void", 42);`],
-      stderr: "",
-    });
-    expect(built.exitCode).toBe(0);
-  });
-
-  // The place of the error is found by a walk that stops at a depth limit. The error itself does not depend on it.
-  test.concurrent("a use in a long chain is found, and a use nested too deep is an error at the import", async () => {
-    const depth = 600;
-    using dir = tempDir("macro-value-use", {
-      "m.ts": macroFile,
-      "chain.ts": `${named}\nexport const sum = m${Buffer.alloc(2 * 20_000, "+x").toString()};\nvar x = 1;\n`,
-      "deep.ts": `${named}\nconsole.log(${Buffer.alloc(depth, "[").toString()}m${Buffer.alloc(depth, "]").toString()});\n`,
-      "import.ts": `
-        ${detail}
-        const errors: unknown[] = [];
-        for (const file of ["./chain.ts", "./deep.ts"]) {
-          try {
-            await import(file);
-            errors.push("loaded");
-          } catch (e) {
-            errors.push(detail(e).map(({ message, at }) => ({ message, at })));
-          }
-        }
-        console.log(JSON.stringify(errors));
-      `,
-    });
-    const { lines, stderr, exitCode } = await run(String(dir), "import.ts");
-    expect({ errors: JSON.parse(lines.at(-1)!), stderr }).toEqual({
-      errors: [
-        [{ message: notDefined("m"), at: [2, 20] }],
-        [{ message: `${notDefined("m")}, but this file uses it outside of a call`, at: [1, 10] }],
-      ],
-      stderr: "",
-    });
     expect(exitCode).toBe(0);
   });
 
@@ -1009,7 +979,7 @@ describe("a macro import that is used outside of a call", () => {
   test.concurrent("a reference that is not a call is an error with --no-macros too", async () => {
     using dir = tempDir("macro-value-use", {
       "m.ts": macroFile,
-      "alias.ts": refused["alias.ts"][0],
+      "alias.ts": `${named} const f = m; console.log(f("x"));\n`,
     });
     const { stderr, exitCode } = await run(String(dir), "build", "--no-macros", "./alias.ts", "--target=bun");
     expect(stderr).toContain(notDefined("m"));
@@ -1040,24 +1010,28 @@ describe("a macro import that is used outside of a call", () => {
         compilerOptions: { experimentalDecorators: true, emitDecoratorMetadata: true },
       }),
       "settings.ts": `export interface Settings { a: number }\nexport function Settings(): Settings { return { a: 1 }; }\n`,
+      // The type is a macro import when the import comes first, and a name that is not bound yet when it comes last.
       "import-first.ts": [...imports, ...body("import-first"), ``].join("\n"),
       "type-first.ts": [...body("type-first"), ...imports, ``].join("\n"),
+      "check.ts": `
+        for (const file of ["./import-first.ts", "./type-first.ts"]) {
+          await import(file);
+          const build = await Bun.build({ entrypoints: [file], target: "bun", throw: false });
+          const output = build.success ? await build.outputs[0].text() : build.logs.join("\\n");
+          console.log(JSON.stringify(output.split("\\n").filter(line => line.includes('__legacyMetadataTS("design:type"'))));
+        }
+      `,
     });
-    for (const file of ["import-first", "type-first"]) {
-      const ran = await run(String(dir), `${file}.ts`);
-      expect({ lines: ran.lines, stderr: ran.stderr }).toEqual({ lines: [`${file} {"a":1} true true`], stderr: "" });
-      expect(ran.exitCode).toBe(0);
-      const built = await run(String(dir), "build", `./${file}.ts`, "--target=bun", "--outdir", "out");
-      expect({ stderr: built.stderr, exitCode: built.exitCode }).toEqual({ stderr: "", exitCode: 0 });
-      const output = await Bun.file(path.join(String(dir), "out", `${file}.js`)).text();
-      expect(output).not.toContain("typeof Settings");
-      expect(output).not.toContain("typeof ns");
-      const bundled = await run(String(dir), `out/${file}.js`);
-      expect({ lines: bundled.lines, stderr: bundled.stderr }).toEqual({
-        lines: [`${file} {"a":1} true true`],
-        stderr: "",
-      });
-    }
+    const { lines, stderr, exitCode } = await run(String(dir), "check.ts");
+    const metadata = JSON.stringify([
+      `  __legacyMetadataTS("design:type", Object)`,
+      `  __legacyMetadataTS("design:type", Object)`,
+    ]);
+    expect({ lines, stderr }).toEqual({
+      lines: [`import-first {"a":1} true true`, metadata, `type-first {"a":1} true true`, metadata],
+      stderr: "",
+    });
+    expect(exitCode).toBe(0);
   });
 
   describe("an import that a macro remap replaces", () => {
@@ -1071,86 +1045,88 @@ describe("a macro import that is used outside of a call", () => {
         `export default function () { return "default at runtime"; }`,
         ``,
       ].join("\n"),
+      "value.ts": `import { m, other } from "fakepkg";\nconst f = m;\nconsole.log(f, other());\n`,
+      // Only the default import is a macro here. The namespace is still imported at runtime.
+      "namespace.ts": `import d, * as ns from "fakepkg";\nconsole.log(d(), ns.other());\n`,
     };
 
-    test.concurrent("is an error when it is used outside of a call", async () => {
-      using dir = tempDir("macro-value-use", {
-        ...remapped,
-        "value.ts": `import { m, other } from "fakepkg";\nconst f = m;\nconsole.log(f, other());\n`,
-        "import.ts": `
-          ${detail}
+    test.concurrent(
+      "is an error when it is used outside of a call, and keeps a namespace import beside it",
+      async () => {
+        using dir = tempDir("macro-value-use", {
+          ...remapped,
+          "load.ts": `
+          ${errorsOf}
           try {
             await import("./value.ts");
-          } catch (e) {
-            console.log(JSON.stringify(detail(e)));
+          } catch (e: any) {
+            console.log(JSON.stringify(errorsOf(e?.errors ?? [e])));
           }
+          await import("./namespace.ts");
         `,
-      });
-      const expected = [
-        {
-          message: notDefined("m"),
-          at: [2, 11],
-          notes: [
-            [`Bun removes this import of "m" because a macro remap replaces it with "./m.ts"`, 1, 10],
-            [remedy("m", "remove its macro remap"), null, null],
+        });
+        const { lines, stderr, exitCode } = await run(String(dir), "load.ts");
+        expect({ errors: JSON.parse(lines[0]), printed: lines.slice(1), stderr }).toEqual({
+          errors: [
+            [
+              notDefined("m"),
+              2,
+              11,
+              [`Bun removes this import of "m" because a macro remap replaces it with "./m.ts"`, 1, 10],
+              [remedy("m", "remove its macro remap"), null, null],
+            ],
           ],
-        },
-      ];
-      const { lines, stderr, exitCode } = await run(String(dir), "import.ts");
-      expect({ errors: JSON.parse(lines.at(-1)!), stderr }).toEqual({ errors: expected, stderr: "" });
-      expect(exitCode).toBe(0);
-      const built = await run(String(dir), "build", "./value.ts", "--target=bun");
-      expect(built.stderr).toContain(notDefined("m"));
-      expect(built.exitCode).toBe(1);
-    });
+          printed: ["7 other at runtime"],
+          stderr: "",
+        });
+        expect(exitCode).toBe(0);
+      },
+    );
 
-    // Only the default import is a macro here. The namespace is still imported at runtime.
-    test.concurrent("keeps the namespace import beside it", async () => {
-      using dir = tempDir("macro-value-use", {
-        ...remapped,
-        "namespace.ts": `import d, * as ns from "fakepkg";\nconsole.log(d(), ns.other());\n`,
-      });
-      const { lines, stderr, exitCode } = await run(String(dir), "namespace.ts");
-      expect({ lines, stderr }).toEqual({ lines: ["7 other at runtime"], stderr: "" });
-      expect(exitCode).toBe(0);
+    // Bun.build() does not read the remaps of bunfig.toml, so this is the command.
+    test.concurrent("keeps the namespace import in a bundle", async () => {
+      using dir = tempDir("macro-value-use", remapped);
       const built = await run(String(dir), "build", "./namespace.ts", "--target=bun", "--outdir", "out");
       expect({ stderr: built.stderr, exitCode: built.exitCode }).toEqual({ stderr: "", exitCode: 0 });
-      const bundled = await run(String(dir), "out/namespace.js");
-      expect({ lines: bundled.lines, stderr: bundled.stderr }).toEqual({ lines: ["7 other at runtime"], stderr: "" });
-      expect(bundled.exitCode).toBe(0);
+      const { lines, stderr, exitCode } = await run(String(dir), "out/namespace.js");
+      expect({ lines, stderr }).toEqual({ lines: ["7 other at runtime"], stderr: "" });
+      expect(exitCode).toBe(0);
     });
   });
 
   // Inside a macro no call is replaced, so a module that a macro loads is not checked. What is transpiled there still
   // names the macro import, so a later load outside of a macro must not read it from the transpiler cache.
-  test.concurrent("a module that a macro loads is not checked, and is not cached for a load outside of a macro", async () => {
-    using dir = tempDir("macro-value-use", {
-      "m.ts": macroFile,
-      "shared.ts": [
-        named,
-        `export function helper() { return "helper"; }`,
-        `export function uncalled() { return m; }`,
-        // Large enough for the transpiler cache to keep.
-        `// ${Buffer.alloc(8 * 1024, "-").toString()}`,
-        ``,
-      ].join("\n"),
-      "outer.ts": `import { helper } from "./shared.ts";\nexport function outer() { return helper(); }\n`,
-      "inside.ts": `import { outer } from "./outer.ts" with { type: "macro" };\nconsole.log("inside", outer());\n`,
-      "outside.ts": `import { helper } from "./shared.ts";\nconsole.log("outside", helper());\n`,
-      "cache": {},
-    });
-    const env = { ...bunEnv, BUN_RUNTIME_TRANSPILER_CACHE_PATH: path.join(String(dir), "cache") };
-    for (const [file, expected] of [
-      ["inside.ts", { lines: ["inside helper"], stderr: "", exitCode: 0 }],
-      ["outside.ts", { lines: [""], stderr: expect.stringContaining(notDefined("m")), exitCode: 1 }],
-    ] as const) {
-      await using proc = Bun.spawn({ cmd: [bunExe(), file], env, cwd: String(dir), stdout: "pipe", stderr: "pipe" });
-      const [stdout, stderr, exitCode] = await Promise.all([proc.stdout.text(), proc.stderr.text(), proc.exited]);
-      const lines = stdout
-        .trim()
-        .split("\n")
-        .filter(line => !line.startsWith("[macro]"));
-      expect({ file, lines, stderr, exitCode }).toEqual({ file, ...expected });
-    }
-  });
+  test.concurrent(
+    "a module that a macro loads is not checked, and is not cached for a load outside of a macro",
+    async () => {
+      using dir = tempDir("macro-value-use", {
+        "m.ts": macroFile,
+        "shared.ts": [
+          named,
+          `export function helper() { return "helper"; }`,
+          `export function uncalled() { return m; }`,
+          // Large enough for the transpiler cache to keep.
+          `// ${Buffer.alloc(8 * 1024, "-").toString()}`,
+          ``,
+        ].join("\n"),
+        "outer.ts": `import { helper } from "./shared.ts";\nexport function outer() { return helper(); }\n`,
+        "inside.ts": `import { outer } from "./outer.ts" with { type: "macro" };\nconsole.log("inside", outer());\n`,
+        "outside.ts": `import { helper } from "./shared.ts";\nconsole.log("outside", helper());\n`,
+        "cache": {},
+      });
+      const env = { ...bunEnv, BUN_RUNTIME_TRANSPILER_CACHE_PATH: path.join(String(dir), "cache") };
+      for (const [file, expected] of [
+        ["inside.ts", { lines: ["inside helper"], stderr: "", exitCode: 0 }],
+        ["outside.ts", { lines: [""], stderr: expect.stringContaining(notDefined("m")), exitCode: 1 }],
+      ] as const) {
+        await using proc = Bun.spawn({ cmd: [bunExe(), file], env, cwd: String(dir), stdout: "pipe", stderr: "pipe" });
+        const [stdout, stderr, exitCode] = await Promise.all([proc.stdout.text(), proc.stderr.text(), proc.exited]);
+        const lines = stdout
+          .trim()
+          .split("\n")
+          .filter(line => !line.startsWith("[macro]"));
+        expect({ file, lines, stderr, exitCode }).toEqual({ file, ...expected });
+      }
+    },
+  );
 });
